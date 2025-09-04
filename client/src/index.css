@@ -1,0 +1,50 @@
+/* client/src/index.css */
+@import "tailwindcss";
+
+/* v4 design tokens */
+@theme {
+  --color-bg: #0b0e14;
+  --color-card: #11151f;
+  --color-accent: #7aa2f7;
+  --color-success: #98c379;
+  --color-danger: #e06c75;
+  --color-chip: #f8e16b;
+
+  --shadow-glow: 0 0 30px rgba(122,162,247,0.25);
+}
+
+/* keep dark-by-class */
+:root.dark { color-scheme: dark; }
+
+html, body, #root {
+  height: 100%;
+  background:
+    radial-gradient(1000px 600px at 50% 0%, rgba(122,162,247,0.08), transparent 70%),
+    var(--color-bg);
+  color: #e6edf3;
+  font-feature-settings: "cv02","cv03","cv04","cv11";
+}
+
+/* 3D flip helpers */
+.card-3d { perspective: 1000px; }
+.card-3d-inner {
+  transform-style: preserve-3d;
+  transition: transform 0.6s cubic-bezier(.2,.8,.2,1);
+}
+.card-3d.flipped .card-3d-inner { transform: rotateY(180deg); }
+.card-face { backface-visibility: hidden; }
+.card-back { transform: rotateY(180deg); }
+
+/* press ripple */
+.ripple { position: relative; overflow: hidden; }
+.ripple::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle, rgba(255,255,255,0.25) 10%, transparent 10.01%)
+    center/10px 10px no-repeat;
+  opacity: 0;
+  transition: opacity .4s ease;
+}
+.ripple:active::after { opacity: 1; }
