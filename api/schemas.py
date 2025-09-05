@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 
 class UserOut(BaseModel):
     id: int
@@ -36,6 +36,9 @@ class BlackjackSessionOut(BaseModel):
     bet_cents: int
     dealer_hand: Hand
     player_hand: Hand
+    player_hands: Optional[List[Hand]] = None
+    active_index: Optional[int] = None
     outcome: Optional[str] = None
     payout_cents: Optional[int] = None
     balance_cents: int
+    shoe_reshuffled: Optional[bool] = None

@@ -11,6 +11,7 @@ from .games.roulette import router as roulette_router
 
 app = FastAPI(title="Casino API")
 
+# TODO: For multi-origin deployments, consider a stricter allowlist or dynamic origin checks
 origins = [os.getenv("CLIENT_ORIGIN", "http://localhost:5173")]
 app.add_middleware(
     CORSMiddleware,

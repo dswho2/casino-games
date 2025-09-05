@@ -8,6 +8,7 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   });
   if (!res.ok) {
     const msg = await res.text().catch(() => res.statusText);
+    // TODO: consider central 401 handling (e.g., dispatch auth:changed or open login modal)
     throw new Error(msg || res.statusText);
   }
   return res.json();

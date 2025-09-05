@@ -1,4 +1,6 @@
 import { motion } from "framer-motion";
+// TODO: The suit glyphs used in this component appear garbled on some systems.
+// Consider replacing with inline SVGs for ♠ ♥ ♦ ♣ to ensure consistency.
 
 type Props = { rank: string; suit: "S"|"H"|"D"|"C"; flipped?: boolean; faceDown?: boolean };
 
@@ -11,7 +13,7 @@ export default function Card({ rank, suit, flipped, faceDown }: Props) {
       <motion.div
         initial={false}
         animate={{ rotateY: flipped ? 180 : 0 }}
-        transition={{ duration: 0.6 }}
+        transition={{ duration: 0.35, ease: "easeOut" }}
         className="card-3d-inner relative w-full h-full"
       >
         <div className="card-face absolute inset-0 rounded-xl bg-card border border-white/10 grid place-items-center">

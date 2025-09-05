@@ -1,14 +1,11 @@
-import { useEffect, useState } from "react";
-import { api } from "../api/client";
-
-type Me = { id: number; email?: string | null; username: string; balance_cents: number };
+import { useEffect } from "react";
+import { useAuthStore } from "../store/auth";
 
 export default function Profile() {
-  const [me, setMe] = useState<Me | null>(null);
+  const me = useAuthStore(s => s.me);
+  const fetchMe = useAuthStore(s => s.fetchMe);
 
-  useEffect(() => {
-    api<Me>("/me").then(setMe).catch(() => setMe(null));
-  }, []);
+  useEffect(() => { fetchMe(); }, [fetchMe]);
 
   return (
     <div className="max-w-4xl mx-auto">

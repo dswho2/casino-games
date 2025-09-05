@@ -1,6 +1,5 @@
 import { useState } from "react";
 import Button from "./Button";
-import AnimatedChipStack from "./AnimatedChipStack";
 
 const PRESETS = [5, 10, 50, 100, 500];
 
@@ -26,8 +25,7 @@ export default function ChipSelector({ onChange }: { onChange: (cents: number) =
           }}
         />
       </div>
-      <div className="flex items-center gap-4">
-        <AnimatedChipStack amount={amount} />
+      <div className="flex items-end justify-end gap-4 mt-1">
         <div className="text-sm text-white/70">Current Bet: <span className="text-white font-semibold">${(amount/100).toFixed(2)}</span></div>
       </div>
     </div>

@@ -31,6 +31,7 @@ def register(payload: RegisterIn, response: Response, db: Session = Depends(get_
 @router.post("/login", response_model=UserOut)
 def login(payload: LoginIn, response: Response, db: Session = Depends(get_db)):
     ident = payload.identifier.strip()
+    # TODO: Consider case-insensitive email checks, e.g., func.lower(User.email) == ident.lower()
     user = db.query(User).filter(or_(User.username == ident, User.email == ident)).first()
     if not user or not verify_pw(payload.password, user.password_hash):
         raise HTTPException(401, "Invalid credentials")

@@ -20,6 +20,7 @@ class Outcome(PyEnum):
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # TODO: Unique + nullable behaves differently across DBs (SQLite vs Postgres). Validate desired semantics for multiple NULLs.
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
@@ -39,6 +40,8 @@ class GameSession(Base):
     bet_cents: Mapped[int] = mapped_column(BigInteger)
     started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     ended_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # TODO: Using a mutable default here can be surprising in Python; prefer default=dict / default=list
+    # which SQLAlchemy will call per-row, or a server_default of '{}' / '[]'.
     state: Mapped[dict] = mapped_column(JSON, default={})  # per game state blob
     actions_log: Mapped[list] = mapped_column(JSON, default=[])
     outcome: Mapped[str | None] = mapped_column(String(20), nullable=True)

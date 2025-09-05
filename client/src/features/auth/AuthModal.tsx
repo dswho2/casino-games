@@ -38,7 +38,8 @@ export default function AuthModal({ open, onClose, onAuthed }: { open: boolean; 
       <motion.div initial={{scale:.9,opacity:0}} animate={{scale:1,opacity:1}} className="w-[92vw] max-w-md rounded-2xl bg-card p-6 border border-white/10 shadow-glow">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-xl font-semibold">{mode === "login" ? "Welcome back" : "Create an account"}</h2>
-          <button onClick={onClose} className="text-white/60 hover:text-white">✕</button>
+          {/* TODO: Replace close icon with a proper SVG */}
+          <button onClick={onClose} className="text-white/60 hover:text-white">×</button>
         </div>
 
         {mode === "login" ? (
@@ -57,6 +58,7 @@ export default function AuthModal({ open, onClose, onAuthed }: { open: boolean; 
               onChange={e=>setPassword(e.target.value)}
             />
             {error && <div className="text-danger text-sm">{error}</div>}
+            {/* TODO: Add basic validation + disable during submit to prevent double posts */}
             <Button className="w-full" onClick={submit}>Login</Button>
             <div className="text-center text-sm text-white/60">
               No account? <button className="text-accent" onClick={()=>setMode("register")}>Register</button>
@@ -84,6 +86,7 @@ export default function AuthModal({ open, onClose, onAuthed }: { open: boolean; 
               onChange={e=>setPassword(e.target.value)}
             />
             {error && <div className="text-danger text-sm">{error}</div>}
+            {/* TODO: Confirm password + stronger password requirements */}
             <Button className="w-full" onClick={submit}>Register</Button>
             <div className="text-center text-sm text-white/60">
               Already have an account? <button className="text-accent" onClick={()=>setMode("login")}>Login</button>
@@ -94,3 +97,4 @@ export default function AuthModal({ open, onClose, onAuthed }: { open: boolean; 
     </div>
   );
 }
+

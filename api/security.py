@@ -9,6 +9,8 @@ from .models import User
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALG = "HS256"
 COOKIE_NAME = "session"
+# In local dev over HTTP, secure cookies won't persist; make this configurable.
+SECURE_COOKIES = os.getenv("SECURE_COOKIES", "0").lower() in ("1", "true", "yes", "on")
 
 def get_db():
     db = SessionLocal()
@@ -29,7 +31,16 @@ def make_jwt(user_id: int) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 def set_session_cookie(resp: Response, token: str):
-    resp.set_cookie(key=COOKIE_NAME, value=token, httponly=True, secure=True, samesite="lax", max_age=7*24*3600, path="/")
+    # NOTE: secure=True prevents cookies on http://localhost; toggle via SECURE_COOKIES env.
+    resp.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=SECURE_COOKIES,
+        samesite="lax",
+        max_age=7*24*3600,
+        path="/",
+    )
 
 def clear_session_cookie(resp: Response):
     resp.delete_cookie(COOKIE_NAME, path="/")
@@ -43,6 +54,7 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
         uid = int(data["sub"])
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    # TODO: SQLAlchemy 2.0 deprecates Query.get(); prefer db.get(User, uid)
     user = db.query(User).get(uid)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Inactive or missing user")
