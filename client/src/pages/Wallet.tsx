@@ -9,7 +9,6 @@ import { amountCentsToDenoms } from "../components/chips";
 const PRESETS = [5, 20, 50, 100, 500, 1000, 2500, 5000];
 
 export default function Wallet() {
-  const me = useAuthStore(s => s.me);
   const fetchMe = useAuthStore(s => s.fetchMe);
   const [selectedCents, setSelectedCents] = useState(0);
   const [selectedSource, setSelectedSource] = useState<"preset" | "custom" | null>(null);

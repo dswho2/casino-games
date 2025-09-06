@@ -3,6 +3,7 @@ import AuthModal from "./features/auth/AuthModal";
 import Home from "./pages/Home";
 import Profile from "./pages/Profile";
 import BlackjackTable from "./features/game/BlackjackTable";
+import RouletteTable from "./features/game/RouletteTable";
 import Wallet from "./pages/Wallet";
 import { useAuthStore } from "./store/auth";
 import ChipStack from "./components/ChipStack";
@@ -107,11 +108,8 @@ export default function App() {
         </div>
       )}
       {route === "roulette" && (
-        <div className="p-6">
-          <div className="max-w-3xl mx-auto rounded-2xl bg-card/70 border border-white/10 p-8 text-center">
-            <div className="text-2xl font-bold mb-2">Roulette</div>
-            <div className="text-white/70">Coming soon</div>
-          </div>
+        <div className="p-4 md:p-8">
+          <RouletteTable />
         </div>
       )}
       {route === "slots" && (

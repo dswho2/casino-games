@@ -11,7 +11,7 @@ type AuthState = {
   logout: () => Promise<void>;
 };
 
-export const useAuthStore = create<AuthState>((set, get) => ({
+export const useAuthStore = create<AuthState>((set) => ({
   me: null,
   loading: false,
   setMe: (me) => set({ me }),
@@ -31,4 +31,3 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     set({ me: null });
   },
 }));
-

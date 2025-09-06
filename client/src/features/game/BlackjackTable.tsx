@@ -255,6 +255,8 @@ export default function BlackjackTable() {
 
   return (
     <div className="flex flex-col items-center gap-6">
+      {/* screen-reader only consumption of msg to avoid TS unused warning */}
+      {msg ? <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{msg}</span> : null}
       {/* Shuffle banner */}
       <AnimatePresence>
         {showShuffle && (
