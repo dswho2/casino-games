@@ -2,33 +2,89 @@ import { useEffect, useState } from "react";
 import AuthModal from "./features/auth/AuthModal";
 import Home from "./pages/Home";
 import Profile from "./pages/Profile";
+import BlackjackTable from "./features/game/BlackjackTable";
 import { useAuthStore } from "./store/auth";
+import ChipStack from "./components/ChipStack";
+
+type Route = "home" | "profile" | "blackjack" | "roulette" | "slots";
 
 export default function App() {
   const [authOpen, setAuthOpen] = useState(false);
-  const [route, setRoute] = useState<"home" | "profile">("home");
+  const [route, setRoute] = useState<Route>("home");
   const me = useAuthStore(s => s.me);
   const fetchMe = useAuthStore(s => s.fetchMe);
   const logout = useAuthStore(s => s.logout);
+  const [displayBalance, setDisplayBalance] = useState<number>(me?.balance_cents ?? 0);
+  const [balanceTint, setBalanceTint] = useState<"none" | "up" | "down">("none");
 
   useEffect(() => {
-    const sync = () => setRoute(location.hash === "#/profile" ? "profile" : "home");
+    const sync = () => {
+      const hash = location.hash || "#/";
+      const path = hash.replace(/^#/, "");
+      // simple hash routing
+      if (path === "/" || path === "/home") setRoute("home");
+      else if (path === "/profile") setRoute("profile");
+      else if (path === "/blackjack") setRoute("blackjack");
+      else if (path === "/roulette") setRoute("roulette");
+      else if (path === "/slots") setRoute("slots");
+      else setRoute("home");
+    };
     window.addEventListener("hashchange", sync);
     sync();
     return () => window.removeEventListener("hashchange", sync);
   }, []);
 
   useEffect(() => { fetchMe(); }, [fetchMe]);
+  
+  // Animate navbar balance number when store balance changes
+  useEffect(() => {
+    const target = me?.balance_cents ?? 0;
+    const from = displayBalance;
+    if (target === from) return;
+    setBalanceTint(target > from ? "up" : "down");
+    let raf = 0;
+    const start = performance.now();
+    const duration = 600;
+    function tick(now: number){
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const value = Math.round(from + (target - from) * eased);
+      setDisplayBalance(value);
+      if (t < 1) raf = requestAnimationFrame(tick);
+      else setTimeout(() => setBalanceTint("none"), 120);
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [me?.balance_cents]);
 
   return (
     <div className="min-h-screen">
       <nav className="sticky top-0 z-10 bg-bg/70 backdrop-blur border-b border-white/10 px-4 py-3 flex items-center justify-between">
-        <div className="font-bold">BJ</div>
-        <div className="flex items-center gap-3">
-          <a href="#/" className="text-white/80 hover:text-white">
-            Table
+        <div className="flex items-center gap-4">
+          <a href="#/" className="font-bold select-none text-white hover:text-white/90">
+            Casino
           </a>
-          <a href="#/profile" className="text-white/80 hover:text-white">
+          <a href="#/blackjack" className={`px-2 py-1 rounded-md transition-colors ${route === "blackjack" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
+            Blackjack
+          </a>
+          <a href="#/roulette" className={`px-2 py-1 rounded-md transition-colors ${route === "roulette" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
+            Roulette
+          </a>
+          <a href="#/slots" className={`px-2 py-1 rounded-md transition-colors ${route === "slots" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
+            Slots
+          </a>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 rounded-lg bg-card px-2 py-1 border border-white/10">
+            <div id="nav-balance-target" className="relative" style={{ top: -1, left: -4 }}>
+              <ChipStack amountCents={500} chipSize={24} className="overflow-visible" />
+            </div>
+            <span className="text-sm text-white/80">Balance:</span>
+            <span className={`font-semibold transition-colors duration-300 ${balanceTint === 'up' ? 'text-success' : balanceTint === 'down' ? 'text-danger' : 'text-white'}`}>
+              ${(displayBalance/100).toFixed(2)}
+            </span>
+          </div>
+          <a href="#/profile" className={`px-2 py-1 rounded-md transition-colors ${route === "profile" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
             {me ? me.username : "Profile"}
           </a>
           {me ? (
@@ -42,7 +98,29 @@ export default function App() {
           )}
         </div>
       </nav>
-      {route === "home" ? <Home /> : <Profile />}
+      {route === "home" && <Home />}
+      {route === "blackjack" && (
+        <div className="p-4 md:p-8">
+          <BlackjackTable />
+        </div>
+      )}
+      {route === "roulette" && (
+        <div className="p-6">
+          <div className="max-w-3xl mx-auto rounded-2xl bg-card/70 border border-white/10 p-8 text-center">
+            <div className="text-2xl font-bold mb-2">Roulette</div>
+            <div className="text-white/70">Coming soon</div>
+          </div>
+        </div>
+      )}
+      {route === "slots" && (
+        <div className="p-6">
+          <div className="max-w-3xl mx-auto rounded-2xl bg-card/70 border border-white/10 p-8 text-center">
+            <div className="text-2xl font-bold mb-2">Slots</div>
+            <div className="text-white/70">Coming soon</div>
+          </div>
+        </div>
+      )}
+      {route === "profile" && <Profile />}
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} onAuthed={() => { setAuthOpen(false); fetchMe(); }} />
     </div>
   );

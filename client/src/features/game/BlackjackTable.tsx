@@ -33,9 +33,7 @@ export default function BlackjackTable() {
   const dealerTimers = useRef<number[]>([]);
   const flippedKeys = useRef<Set<string>>(new Set());
   const potRef = useRef<HTMLDivElement | null>(null);
-  const balanceChipRef = useRef<HTMLDivElement | null>(null);
   const [flyingChips, setFlyingChips] = useState<{ id:number; x:number; y:number; dx:number; dy:number; delay:number; value:number }[]>([]);
-  const [displayBalance, setDisplayBalance] = useState<number>(me?.balance_cents ?? 0);
   const [showShuffle, setShowShuffle] = useState(false);
   const naturalSeen = useRef<Set<string>>(new Set());
   const [naturalPulse, setNaturalPulse] = useState<Record<number, boolean>>({});
@@ -43,23 +41,7 @@ export default function BlackjackTable() {
 
   useEffect(() => { fetchMe(); }, [fetchMe]);
 
-  // Animate balance number when store balance changes
-  useEffect(() => {
-    const target = me?.balance_cents ?? 0;
-    let raf = 0;
-    const start = performance.now();
-    const from = displayBalance;
-    const duration = 600;
-    function tick(now: number){
-      const t = Math.min(1, (now - start) / duration);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const value = Math.round(from + (target - from) * eased);
-      setDisplayBalance(value);
-      if (t < 1) raf = requestAnimationFrame(tick);
-    }
-    if (from !== target) raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [me?.balance_cents]);
+  // Balance display moved to navbar; animation handled there if desired.
 
   // Reset flip state on new round id
   useEffect(() => {
@@ -236,9 +218,11 @@ export default function BlackjackTable() {
   const potCents = inProgress ? (round?.bet_cents ?? bet) : bet;
 
   function launchPayoutChips(payoutCents: number){
-    if (!potRef.current || !balanceChipRef.current) return;
+    if (!potRef.current) return;
+    const target = document.getElementById('nav-balance-target');
+    if (!target) return;
     const s = potRef.current.getBoundingClientRect();
-    const e = balanceChipRef.current.getBoundingClientRect();
+    const e = target.getBoundingClientRect();
     const chipSize = 24; // px (matches Chip size below)
     const startX = s.left + s.width/2 - chipSize/2;
     const startY = s.top + s.height/2 - chipSize/2;
@@ -288,13 +272,6 @@ export default function BlackjackTable() {
       </AnimatePresence>
       <header className="w-full max-w-5xl flex justify-between items-center">
         <h1 className="text-2xl font-bold">Blackjack</h1>
-        <div className="rounded-lg bg-card px-2 py-2 border border-white/10 flex items-center gap-2">
-          <div ref={balanceChipRef} className="relative" style={{ top: 2, left: -4 }}>
-            <ChipStack amountCents={500} chipSize={32} className="overflow-visible"/>
-          </div>
-          <span>Balance:</span>
-          <span className="font-semibold">${((displayBalance ?? 0)/100).toFixed(2)}</span>
-        </div>
       </header>
 
       <div className="w-full max-w-5xl grid lg:grid-cols-[2fr_1fr] gap-6">
