@@ -3,10 +3,11 @@ import AuthModal from "./features/auth/AuthModal";
 import Home from "./pages/Home";
 import Profile from "./pages/Profile";
 import BlackjackTable from "./features/game/BlackjackTable";
+import Wallet from "./pages/Wallet";
 import { useAuthStore } from "./store/auth";
 import ChipStack from "./components/ChipStack";
 
-type Route = "home" | "profile" | "blackjack" | "roulette" | "slots";
+type Route = "home" | "profile" | "blackjack" | "roulette" | "slots" | "wallet";
 
 export default function App() {
   const [authOpen, setAuthOpen] = useState(false);
@@ -27,6 +28,7 @@ export default function App() {
       else if (path === "/blackjack") setRoute("blackjack");
       else if (path === "/roulette") setRoute("roulette");
       else if (path === "/slots") setRoute("slots");
+      else if (path === "/wallet") setRoute("wallet");
       else setRoute("home");
     };
     window.addEventListener("hashchange", sync);
@@ -75,7 +77,7 @@ export default function App() {
           </a>
         </div>
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 rounded-lg bg-card px-2 py-1 border border-white/10">
+          <a href="#/wallet" role="button" className="flex items-center gap-2 rounded-lg bg-card px-2 py-1 border border-white/10 transition-shadow hover:shadow-[0_0_24px_rgba(122,162,247,0.45)] focus:outline-none">
             <div id="nav-balance-target" className="relative" style={{ top: -1, left: -4 }}>
               <ChipStack amountCents={500} chipSize={24} className="overflow-visible" />
             </div>
@@ -83,7 +85,7 @@ export default function App() {
             <span className={`font-semibold transition-colors duration-300 ${balanceTint === 'up' ? 'text-success' : balanceTint === 'down' ? 'text-danger' : 'text-white'}`}>
               ${(displayBalance/100).toFixed(2)}
             </span>
-          </div>
+          </a>
           <a href="#/profile" className={`px-2 py-1 rounded-md transition-colors ${route === "profile" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
             {me ? me.username : "Profile"}
           </a>
@@ -121,6 +123,7 @@ export default function App() {
         </div>
       )}
       {route === "profile" && <Profile />}
+      {route === "wallet" && <Wallet />}
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} onAuthed={() => { setAuthOpen(false); fetchMe(); }} />
     </div>
   );

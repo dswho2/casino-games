@@ -42,3 +42,9 @@ class BlackjackSessionOut(BaseModel):
     payout_cents: Optional[int] = None
     balance_cents: int
     shoe_reshuffled: Optional[bool] = None
+
+# Wallet
+class DepositIn(BaseModel):
+  amount_cents: int = Field(gt=0, description="Positive amount in cents to deposit")
+  password: str = Field(min_length=1, description="User password for re-authentication")
+  note: Optional[str] = None

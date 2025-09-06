@@ -23,11 +23,14 @@ export default memo(function ChipStack({
   maxColumns = 3,
   className,
 }: Props) {
+  // Early-out: when amount is less than $1, render nothing
+  if (amountCents < 100) return null;
   // Expand into chip denominations
   const chips = useMemo(
     () => amountCentsToDenoms(amountCents, maxColumns * maxPerColumn),
     [amountCents, maxColumns, maxPerColumn]
   );
+  if (chips.length === 0) return null;
 
   // Geometry for image-based chip (image height ~ size/2). Step controls vertical overlap.
   const imgH = chipImageHeight(chipSize);

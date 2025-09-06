@@ -9,7 +9,7 @@ type Game = {
 };
 
 const GAMES: Game[] = [
-  { slug: "blackjack", title: "Blackjack", image: "/games/blackjack.webp", badge: "Live", featured: true },
+  { slug: "blackjack", title: "Blackjack", image: "/games/blackjack.webp", badge: "Popular", featured: true },
   { slug: "roulette", title: "Roulette", image: "/games/roulette.webp", badge: "New" },
   { slug: "slots", title: "Slots", image: "/games/slots.webp" },
 ];
