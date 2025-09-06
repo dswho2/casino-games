@@ -18,6 +18,7 @@ export default function App() {
   const logout = useAuthStore(s => s.logout);
   const [displayBalance, setDisplayBalance] = useState<number>(me?.balance_cents ?? 0);
   const [balanceTint, setBalanceTint] = useState<"none" | "up" | "down">("none");
+  const formatMoney = (cents: number) => (cents/100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   useEffect(() => {
     const sync = () => {
@@ -84,7 +85,7 @@ export default function App() {
             </div>
             <span className="text-sm text-white/80">Balance:</span>
             <span className={`font-semibold transition-colors duration-300 ${balanceTint === 'up' ? 'text-success' : balanceTint === 'down' ? 'text-danger' : 'text-white'}`}>
-              ${(displayBalance/100).toFixed(2)}
+              ${formatMoney(displayBalance)}
             </span>
           </a>
           <a href="#/profile" className={`px-2 py-1 rounded-md transition-colors ${route === "profile" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>

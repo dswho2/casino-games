@@ -280,7 +280,12 @@ export default function BlackjackTable() {
                   </motion.div>
                 ))
               )
-            ) : null}
+            ) : (
+              <>
+                <Card rank="" suit="S" faceDown />
+                <Card rank="" suit="S" faceDown />
+              </>
+            )}
           </motion.div>
 
           <div className="text-white/70 text-sm mb-2">Player</div>
@@ -319,6 +324,15 @@ export default function BlackjackTable() {
                 </motion.div>
               </motion.div>
             ))}
+            {hands.length === 0 && (
+              <motion.div className={`relative overflow-visible rounded-xl p-2 border border-white/10`}>
+                <div className="text-white/60 text-xs mb-1">Your Hand</div>
+                <div className="flex gap-2">
+                  <Card rank="" suit="S" faceDown />
+                  <Card rank="" suit="S" faceDown />
+                </div>
+              </motion.div>
+            )}
           </div>
 
           
