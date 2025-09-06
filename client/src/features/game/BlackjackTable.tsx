@@ -4,8 +4,8 @@ import Card from "../../components/Card";
 import Button from "../../components/Button";
 import ChipSelector from "../../components/ChipSelector";
 import ChipStack from "../../components/ChipStack";
-import { amountCentsToDenoms } from "../../components/chips";
 import { motion, AnimatePresence } from "framer-motion";
+import { buildChipFlights, ChipFlightOverlay, getNavBalanceTarget } from "../../components/ChipFlight";
 import { useAuthStore } from "../../store/auth";
 
 type Hand = { cards: { r: string, s: "S"|"H"|"D"|"C" }[], value: number, soft: boolean };
@@ -219,38 +219,13 @@ export default function BlackjackTable() {
 
   function launchPayoutChips(payoutCents: number){
     if (!potRef.current) return;
-    const target = document.getElementById('nav-balance-target');
+    const target = getNavBalanceTarget();
     if (!target) return;
     const s = potRef.current.getBoundingClientRect();
-    const e = target.getBoundingClientRect();
-    const chipSize = 24; // px (matches Chip size below)
-    const startX = s.left + s.width/2 - chipSize/2;
-    const startY = s.top + s.height/2 - chipSize/2;
-    const endX = e.left + e.width/2 - chipSize/2;
-    const endY = e.top + e.height/2 - chipSize/2;
-    const dx = endX - startX;
-    const dy = endY - startY;
-    const chipVals = payoutToChips(payoutCents);
-    const animMs = 500; // flight duration per chip (kept in sync with transition below)
-    const interDelay = 80; // stagger between chips
-    const chips = chipVals.map((val, i) => ({
-      id: Date.now() + i,
-      x: startX,
-      y: startY,
-      dx,
-      dy,
-      delay: i * interDelay,
-      value: val,
-    }));
-    setFlyingChips(chips);
-    // Clear shortly after the last chip arrives (minimal linger)
-    const lastDelay = chips.length ? chips[chips.length - 1].delay : 0;
-    const clearAfter = lastDelay + animMs + 120; // small buffer
+    const { flights, totalDelay } = buildChipFlights(payoutCents, s, target, { chipSize: 24, interDelay: 80, maxChips: 12 });
+    setFlyingChips(flights);
+    const clearAfter = totalDelay + 500 + 120; // duration + small buffer
     setTimeout(() => setFlyingChips([]), clearAfter);
-  }
-
-  function payoutToChips(amountCents: number): number[] {
-    return amountCentsToDenoms(amountCents, 12);
   }
 
   return (
@@ -401,22 +376,7 @@ export default function BlackjackTable() {
         </div>
       </div>
       {/* Chip flight overlay */}
-      <div className="pointer-events-none fixed inset-0 z-50">
-        <AnimatePresence initial={false}>
-          {flyingChips.map(ch => (
-            <motion.div
-              key={ch.id}
-              initial={{ x: ch.x, y: ch.y, opacity: 0, scale: 0.9 }}
-              animate={{ x: ch.x + ch.dx, y: ch.y + ch.dy, opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.92, transition: { duration: 0.18 } }}
-              transition={{ delay: ch.delay/1000, duration: 0.5, ease: "easeOut" }}
-              className="absolute"
-            >
-              <ChipStack amountCents={ch.value * 100} chipSize={32} />
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
+      <ChipFlightOverlay flights={flyingChips} chipSize={32} durationMs={500} />
     </div>
   );
 }

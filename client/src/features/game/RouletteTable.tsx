@@ -3,8 +3,8 @@ import type { CSSProperties } from "react";
 import { api } from "../../api/client";
 import Button from "../../components/Button";
 import ChipStack from "../../components/ChipStack";
-import { chipColorFor, chipSrc, chipImageHeight, amountCentsToDenoms } from "../../components/chips";
-import { motion, AnimatePresence } from "framer-motion";
+import { chipColorFor, chipSrc, chipImageHeight } from "../../components/chips";
+import { ChipFlightOverlay, buildChipFlights, getNavBalanceTarget } from "../../components/ChipFlight";
 // ChipSelector removed in favor of draggable chips
 import { useAuthStore } from "../../store/auth";
 
@@ -249,46 +249,26 @@ export default function RouletteTable() {
       setPhase("settling");
       // Launch chip flights from winning zones (based on original bets)
       try {
-        let flights: { id:number; x:number; y:number; dx:number; dy:number; delay:number; value:number }[] = [];
-        let id = Date.now();
-        const targetEl = (document.getElementById('nav-balance-target')
-          || document.querySelector('.nav-balance-target')
-          || document.querySelector('[data-nav-balance-target]')) as HTMLElement | null;
-        let destX = Math.max(40, window.innerWidth - 80);
-        let destY = 40; // fallback top-right
+        const targetEl = getNavBalanceTarget();
         if (targetEl) {
-          const r = targetEl.getBoundingClientRect();
-          destX = r.left + r.width / 2;
-          destY = r.top + r.height / 2;
+          const allFlights: { id:number; x:number; y:number; dx:number; dy:number; delay:number; value:number }[] = [];
+          let baseDelay = 0;
+          for (const p of (res.payouts || [])) {
+            if (!p || (p.win_amount || 0) <= 0) continue;
+            const [ptype, praw = ''] = String(p.selection || '').split(':', 2);
+            let key = `${ptype}:${praw}`;
+            if (ptype === 'even' || ptype === 'odd' || ptype === 'low' || ptype === 'high') key = `${ptype}:${praw.toUpperCase()}`;
+            const el = zoneRefs.current[key];
+            if (!el) continue;
+            const rect = el.getBoundingClientRect();
+            const built = buildChipFlights(p.win_amount, rect, targetEl, { chipSize: 24, interDelay: 80, baseDelay, maxChips: 12 });
+            allFlights.push(...built.flights);
+            baseDelay += built.totalDelay;
+          }
+          setFlyingChips(allFlights);
+          const clearAfter = baseDelay + 500 + 140;
+          setTimeout(() => setFlyingChips([]), clearAfter);
         }
-
-        // Build from server payouts using multiple chips (like Blackjack)
-        let delayBase = 0;
-        for (const p of (res.payouts || [])) {
-          if (!p || (p.win_amount || 0) <= 0) continue;
-          const [ptype, praw = ''] = String(p.selection || '').split(':', 2);
-          let key = `${ptype}:${praw}`;
-          if (ptype === 'even' || ptype === 'odd' || ptype === 'low' || ptype === 'high') key = `${ptype}:${praw.toUpperCase()}`;
-          const el = zoneRefs.current[key];
-          if (!el) continue;
-          const rect = el.getBoundingClientRect();
-          const chipSize = 24;
-          const startX = rect.left + rect.width * 0.66 - chipSize/2;
-          const startY = rect.bottom - 4 - chipSize/2;
-          const endX = destX - chipSize/2; const endY = destY - chipSize/2;
-          const dx = endX - startX; const dy = endY - startY;
-          const chipVals = amountCentsToDenoms(p.win_amount, 12);
-          const interDelay = 80;
-          chipVals.forEach((val, i) => {
-            flights.push({ id: id++, x: startX, y: startY, dx, dy, delay: delayBase + i*interDelay, value: val });
-          });
-          delayBase += Math.max(0, chipVals.length * interDelay);
-        }
-        setFlyingChips(flights);
-        const animMs = 500;
-        const lastDelay = flights.length ? flights[flights.length - 1].delay : 0;
-        const clearAfter = lastDelay + animMs + 140;
-        setTimeout(() => setFlyingChips([]), clearAfter);
       } catch {}
     } catch (e: any) {
       setError(e?.message || "Failed to settle");
@@ -694,23 +674,7 @@ export default function RouletteTable() {
           )}
         </div>
       </div>
-      {/* Chip flight overlay */}
-      <div className="pointer-events-none fixed inset-0 z-50">
-        <AnimatePresence initial={false}>
-          {flyingChips.map(ch => (
-            <motion.div
-              key={ch.id}
-              initial={{ x: ch.x, y: ch.y, opacity: 0, scale: 0.9 }}
-              animate={{ x: ch.x + ch.dx, y: ch.y + ch.dy, opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.92, transition: { duration: 0.18 } }}
-              transition={{ delay: ch.delay/1000, duration: 0.5, ease: "easeOut" }}
-              className="absolute"
-            >
-              <ChipStack amountCents={ch.value * 100} chipSize={32} />
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
+      <ChipFlightOverlay flights={flyingChips} chipSize={32} durationMs={500} />
     </div>
   );
 }
