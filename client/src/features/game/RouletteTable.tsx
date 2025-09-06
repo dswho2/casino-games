@@ -132,6 +132,8 @@ export default function RouletteTable() {
     settleRequestedRef.current = false;
     setLanded(false);
 
+    // Ensure ball is visible for the new spin
+    if (ballRef.current) { ballRef.current.style.opacity = '1'; }
     cancelAnimationFrame(rafRef.current);
     const loop = (now: number) => {
       const t = Math.min(1, (now - start) / duration);
@@ -170,8 +172,8 @@ export default function RouletteTable() {
       // Decay post-landing bounce
       bounceRef.current *= 0.92;
 
-      // Blur the wheel more when fast (approximate with remaining time)
-      const blur = (1 - Math.min(1, t * 1.15)) * 3.5; // px
+      // Blur: start unblurring earlier for clearer mid/late spin
+      const blur = (1 - Math.min(1, t * 1.85)) * 3.5; // px
       if (wheelRef.current) {
         const deg = (wheelAngle * 180) / Math.PI;
         wheelRef.current.style.transform = `rotate(${deg}deg)`;
@@ -305,9 +307,40 @@ export default function RouletteTable() {
     settleRequestedRef.current = false;
     bounceRef.current = 0;
     lastTickAtRef.current = 0;
-    if (wheelRef.current) { wheelRef.current.style.transform = ''; wheelRef.current.style.filter = ''; }
+    // Fade out ball and glow immediately
+    if (ballRef.current) { ballRef.current.style.opacity = '0'; }
+    if (glowRef.current) { glowRef.current.style.opacity = '0'; }
+    // Smoothly rotate wheel back to baseline (0°) instead of snapping
+    (function smoothReset(){
+      const el = wheelRef.current;
+      if (!el) return;
+      // Parse current rotation in degrees
+      const m = /rotate\(([-+0-9\.]+)deg\)/.exec(el.style.transform || '');
+      let from = m ? parseFloat(m[1]) : 0;
+      if (!isFinite(from)) from = 0;
+      const to = 0; // baseline orientation used by the asset (0 on top)
+      // Shortest angular delta in [-180,180]
+      let delta = ((to - from + 540) % 360) - 180;
+      const start = performance.now();
+      const duration = 600;
+      const ease = (u: number) => 1 - Math.pow(1 - u, 3); // easeOutCubic
+      const tick = (now: number) => {
+        const t = Math.min(1, (now - start) / duration);
+        const deg = from + delta * ease(t);
+        el.style.transform = `rotate(${deg}deg)`;
+        el.style.filter = '';
+        if (t < 1) rafRef.current = requestAnimationFrame(tick);
+        else {
+          // Ensure final exact baseline state
+          el.style.transform = '';
+          el.style.filter = '';
+        }
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    })();
+    // Reset ball transform after rotation completes
     if (ballRef.current) { ballRef.current.style.transform = ''; }
-    if (glowRef.current) { glowRef.current.style.opacity = '0'; glowRef.current.style.transform = 'translate(-50%, -50%)'; }
+    if (hudTextRef.current) { hudTextRef.current.textContent = 'Place your bets'; }
     if (hudTextRef.current) { hudTextRef.current.textContent = 'Place your bets'; }
     setLanded(false);
 
