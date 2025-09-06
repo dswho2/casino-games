@@ -25,6 +25,17 @@ html, body, #root {
   font-feature-settings: "cv02","cv03","cv04","cv11";
 }
 
+/* Remove stepper arrows on number inputs (custom bet box etc.) */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 /* 3D flip helpers */
 .card-3d { perspective: 1000px; }
 .card-3d-inner {

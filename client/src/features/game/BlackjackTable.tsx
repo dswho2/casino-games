@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import Card from "../../components/Card";
 import Button from "../../components/Button";
-import ChipSelector from "../../components/ChipSelector";
+// ChipSelector replaced by chip buttons + custom input
 import ChipStack from "../../components/ChipStack";
+import Chip from "../../components/Chip";
 import { motion, AnimatePresence } from "framer-motion";
 import { buildChipFlights, ChipFlightOverlay, getNavBalanceTarget } from "../../components/ChipFlight";
 import { useAuthStore } from "../../store/auth";
@@ -38,6 +39,19 @@ export default function BlackjackTable() {
   const naturalSeen = useRef<Set<string>>(new Set());
   const [naturalPulse, setNaturalPulse] = useState<Record<number, boolean>>({});
   const autoStood = useRef<Set<string>>(new Set());
+  const [customBet, setCustomBet] = useState<string>("");
+
+  // Bet helpers
+  const maxBalance = me?.balance_cents ?? 0;
+  const fmt = (cents: number) => (cents/100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const addBetCents = (cents: number) => {
+    if (!Number.isFinite(cents) || cents <= 0) return;
+    const next = Math.min(maxBalance, bet + cents);
+    setBetError(null);
+    setBet(next);
+  };
+  const clearBet = () => { setBet(0); setBetError(null); };
+  const allIn = () => { setBet(maxBalance); setBetError(null); };
 
   useEffect(() => { fetchMe(); }, [fetchMe]);
 
@@ -378,11 +392,57 @@ export default function BlackjackTable() {
 
         <div className="rounded-2xl bg-card border border-white/10 p-4 shadow-glow">
           <div className="text-white/70 text-sm mb-2">Bet Controls</div>
-          <ChipSelector onChange={(c)=>{ setBet(c); setBetError(null); }} />
+          {/* Chip buttons add to current bet */}
+          <div className="flex flex-wrap gap-3 items-center">
+            {([1,5,10,25,100,500,1000,5000] as const).map(denom => (
+              <button
+                key={denom}
+                type="button"
+                disabled={!!(round && round.status !== 'settled')}
+                onClick={() => { setBetError(null); addBetCents(denom * 100); }}
+                className="flex items-center gap-2 px-2 py-1 rounded border border-white/10 hover:border-accent disabled:opacity-50"
+                title={`Add $${denom}`}
+              >
+                <Chip denom={denom} size={28} />
+                <span className="text-white/80 text-sm">+${denom.toLocaleString()}</span>
+              </button>
+            ))}
+            <div className="ml-auto text-white/70 text-sm">Current Bet: <span className="text-white font-semibold">${fmt(bet)}</span></div>
+          </div>
+
+          {/* Custom add / clear / all-in */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              placeholder="$ . . ."
+              value={customBet}
+              onChange={(e) => setCustomBet(e.target.value)}
+              className="w-18 rounded-md bg-black/30 border border-white/10 px-2 py-1 text-white/90 placeholder:text-white/50 focus:outline-none focus:ring-1 focus:ring-accent"
+              disabled={!!(round && round.status !== 'settled')}
+            />
+            <Button
+              onClick={() => { const dollars = Number(customBet); if (Number.isFinite(dollars) && dollars > 0) { addBetCents(Math.round(dollars * 100)); setCustomBet(''); } }}
+              className="px-3 py-1"
+              disabled={!!(round && round.status !== 'settled')}
+            >
+              Add
+            </Button>
+            <Button onClick={clearBet} className="px-3 py-1" disabled={!!(round && round.status !== 'settled')}>Clear</Button>
+            <Button
+              onClick={allIn}
+              variant="secondary"
+              className="px-3 py-1 bg-red-600 hover:bg-red-500 text-white border border-red-500/40"
+              disabled={(me?.balance_cents ?? 0) <= 0 || !!(round && round.status !== 'settled')}
+            >
+              All In
+            </Button>
+          </div>
+
           {(!round || round.status === "settled") && (
             <>
-              <Button className="w-full mt-4" onClick={() => { setMsg(null); start(); }}>
-                Place Bet & Deal
+              <Button className="w-full mt-4" onClick={() => { setMsg(null); start(); }} disabled={bet <= 0}>
+                Place Bet
               </Button>
               {betError && <div className="text-danger text-sm mt-2">{betError}</div>}
             </>

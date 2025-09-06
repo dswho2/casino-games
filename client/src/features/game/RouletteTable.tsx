@@ -173,7 +173,7 @@ export default function RouletteTable() {
       bounceRef.current *= 0.92;
 
       // Blur: start unblurring earlier for clearer mid/late spin
-      const blur = (1 - Math.min(1, t * 1.85)) * 3.5; // px
+      const blur = (1 - Math.min(1, t * 1.85)) * 1.2; // px
       if (wheelRef.current) {
         const deg = (wheelAngle * 180) / Math.PI;
         wheelRef.current.style.transform = `rotate(${deg}deg)`;
