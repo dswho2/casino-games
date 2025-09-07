@@ -4,11 +4,12 @@ import Home from "./pages/Home";
 import Profile from "./pages/Profile";
 import BlackjackTable from "./features/game/BlackjackTable";
 import RouletteTable from "./features/game/RouletteTable";
+import PokerTable from "./features/game/PokerTable";
 import Wallet from "./pages/Wallet";
 import { useAuthStore } from "./store/auth";
 import ChipStack from "./components/ChipStack";
 
-type Route = "home" | "profile" | "blackjack" | "roulette" | "slots" | "wallet";
+type Route = "home" | "profile" | "blackjack" | "roulette" | "poker" | "slots" | "wallet";
 
 export default function App() {
   const [authOpen, setAuthOpen] = useState(false);
@@ -29,6 +30,7 @@ export default function App() {
       else if (path === "/profile") setRoute("profile");
       else if (path === "/blackjack") setRoute("blackjack");
       else if (path === "/roulette") setRoute("roulette");
+      else if (path === "/poker") setRoute("poker");
       else if (path === "/slots") setRoute("slots");
       else if (path === "/wallet") setRoute("wallet");
       else setRoute("home");
@@ -74,6 +76,9 @@ export default function App() {
           <a href="#/roulette" className={`px-2 py-1 rounded-md transition-colors ${route === "roulette" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
             Roulette
           </a>
+          <a href="#/poker" className={`px-2 py-1 rounded-md transition-colors ${route === "poker" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
+            Poker
+          </a>
           <a href="#/slots" className={`px-2 py-1 rounded-md transition-colors ${route === "slots" ? "text-white bg-card" : "text-white/80 hover:text-white"}`}>
             Slots
           </a>
@@ -111,6 +116,11 @@ export default function App() {
       {route === "roulette" && (
         <div className="p-4 md:p-8">
           <RouletteTable />
+        </div>
+      )}
+      {route === "poker" && (
+        <div className="p-4 md:p-8">
+          <PokerTable />
         </div>
       )}
       {route === "slots" && (

@@ -1,240 +1,323 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../../api/client";
+import { api, API_BASE } from "../../api/client";
 import Button from "../../components/Button";
-import ChipSelector from "../../components/ChipSelector";
+import Card from "../../components/Card";
+import ChipStack from "../../components/ChipStack";
+import { ChipFlightOverlay, buildChipFlights, getNavBalanceTarget } from "../../components/ChipFlight";
 import { useAuthStore } from "../../store/auth";
 
-type Bet = { type: "straight" | "color"; target: string; amount_cents: number };
+type TableSummary = {
+  id: string; name: string; isPrivate: boolean;
+  smallBlind: number; bigBlind: number; minBuyIn: number; maxBuyIn: number;
+  maxSeats: number; seatsTaken: number; status: string;
+};
 
-type WheelConfig = { pockets: string[]; step: number; assetOffsetRad: number };
+type Seat = { seat_no: number; user_id?: number|null; username?: string|null; stack: number; sitting_out: boolean; connected: boolean };
 
-type StartResp = { targetNumber: string; commitHash: string; spinId: number; wheelConfig: WheelConfig };
-type SettleResp = { payouts: { selection: string; amount_wagered: number; multiple: number; win_amount: number }[]; newBalance: number; seed: string };
+type HandView = {
+  handId: number; dealerSeat: number; smallBlindSeat: number; bigBlindSeat: number;
+  deckCommit: string; board: [number, "S"|"H"|"D"|"C"][]; pot: number; stage: string;
+  toAct?: number|null; minRaise: number; curBet: number;
+  players: { seatNo: number; hasFolded: boolean; isAllIn: boolean; streetBet: number; totalContrib: number }[];
+} | null;
 
-// European single-zero layout (clockwise from top 0)
-const EURO_POCKETS = [
-  "0",
-  "32","15","19","4","21","2","25","17","34","6","27","13","36","11","30","8","23",
-  "10","5","24","16","33","1","20","14","31","9","22","18","29","7","28","12","35","3","26",
-];
-const STEP = (Math.PI * 2) / EURO_POCKETS.length;
-const WHEEL_ASSET_OFFSET = 0; // radians; set non-zero if art misaligned
+type TableSnapshot = { table: { id: string; name: string; smallBlind: number; bigBlind: number; minBuyIn: number; maxBuyIn: number; maxSeats: number }; seats: Seat[]; hand: HandView };
 
-type Phase = "betting" | "spinning" | "settling";
+type WsEvent =
+  | { type: "TABLE_SNAPSHOT"; state: TableSnapshot }
+  | { type: "PLAYER_SEATED"; seatNo: number; user: { id: number; name: string } }
+  | { type: "BUY_IN_APPLIED"; seatNo: number; amount: number; stack: number }
+  | { type: "PLAYER_LEFT"; seatNo: number }
+  | { type: "PLAYER_SIT_OUT"; seatNo: number }
+  | { type: "PLAYER_SIT_IN"; seatNo: number }
+  | { type: "HAND_STARTED"; handId: number; dealerSeat: number; smallBlindSeat: number; bigBlindSeat: number; deckCommit: string }
+  | { type: "DEAL_FLOP"; cards: any }
+  | { type: "DEAL_TURN"; card: any }
+  | { type: "DEAL_RIVER"; card: any }
+  | { type: "ACTION_REQUIRED"; seatNo: number; minRaise: number; toCall: number; timeLeftMs: number }
+  | { type: "PLAYER_ACTION_APPLIED"; seatNo: number; action: string; amount: number; toCallNext: number }
+  | { type: "POT_AWARDED"; potIndex: number; seatNo: number; amount: number }
+  | { type: "SHOWDOWN"; hands: any; pots: any }
+  | { type: "HAND_ENDED"; nextDealerSeat: number; seed?: string }
+  | { type: "CASHED_OUT"; seatNo: number; amount: number }
+  | { type: "CASH_OUT_OK"; amount: number; newBalance: number }
+  | { type: "ERROR"; reason: string };
 
-export default function RouletteTable() {
+export default function PokerTable() {
   const me = useAuthStore(s => s.me);
+  const fetchMe = useAuthStore(s => s.fetchMe);
   const setMe = useAuthStore(s => s.setMe);
-  const [phase, setPhase] = useState<Phase>("betting");
-  const [bets, setBets] = useState<Bet[]>([]);
-  const [selectedAmount, setSelectedAmount] = useState<number>(500); // cents
+  const [tables, setTables] = useState<TableSummary[]>([]);
+  const [selected, setSelected] = useState<TableSummary | null>(null);
+  const [seats, setSeats] = useState<Seat[]>([]);
+  const [hand, setHand] = useState<HandView>(null);
   const [error, setError] = useState<string | null>(null);
+  const [ws, setWs] = useState<WebSocket | null>(null);
+  const [connectedTableId, setConnectedTableId] = useState<string | null>(null);
+  const [mySeat, setMySeat] = useState<number | null>(null);
+  // Sit modal state (dollars input)
+  const [showSitModal, setShowSitModal] = useState(false);
+  const [pendingSeat, setPendingSeat] = useState<number | null>(null);
+  const [sitDollars, setSitDollars] = useState<string>("");
+  const awaitingBuyIn = useRef<{ seatNo: number; amount: number } | null>(null);
+  const [flyingChips, setFlyingChips] = useState<any[]>([]);
+  const potRef = useRef<HTMLDivElement | null>(null);
+  const seatRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
-  // Round data
-  const [spinId, setSpinId] = useState<number | null>(null);
-  const [commitHash, setCommitHash] = useState<string | null>(null);
-  const [seed, setSeed] = useState<string | null>(null);
-  const [targetNumber, setTargetNumber] = useState<string | null>(null);
-  const [wheelCfg, setWheelCfg] = useState<WheelConfig | null>(null);
-  const [payouts, setPayouts] = useState<SettleResp["payouts"]>([]);
+  useEffect(() => { fetchMe(); }, [fetchMe]);
+  useEffect(() => { loadTables(); }, []);
 
-  const totalWager = useMemo(() => bets.reduce((s, b) => s + b.amount_cents, 0), [bets]);
-  const maxPotential = useMemo(() => bets.reduce((s, b) => s + (b.type === "straight" ? b.amount_cents * 36 : b.amount_cents * 2), 0), [bets]);
-
-  function addBet(b: Bet){
-    if (phase !== "betting") return;
-    setBets(prev => [...prev, b]);
-  }
-  function clearBets(){ if (phase === "betting") setBets([]); }
-
-  // Animation refs
-  const wheelRef = useRef<HTMLDivElement>(null);
-  const ballRef = useRef<HTMLDivElement>(null);
-  const glowRef = useRef<HTMLDivElement>(null);
-  const hudTextRef = useRef<HTMLDivElement>(null);
-  const rafRef = useRef<number>(0);
-
-  // Audio: quiet tick using WebAudio oscillator
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  function tickSound(){
+  async function loadTables(){
     try {
-      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const ac = audioCtxRef.current!;
-      const osc = ac.createOscillator();
-      const gain = ac.createGain();
-      osc.type = "square"; osc.frequency.value = 1200;
-      gain.gain.value = 0.02;
-      osc.connect(gain).connect(ac.destination);
-      osc.start();
-      osc.stop(ac.currentTime + 0.03);
-    } catch {}
+      const list = await api<TableSummary[]>(`/poker/tables`);
+      // Prefer the always-open 'main' table by default
+      const main = list.find(t => t.id === 'main') || null;
+      setTables(list);
+      setSelected(prev => prev ?? main ?? list[0] ?? null);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load tables");
+    }
   }
 
-  // Deterministic spin animation
-  function runSpinAnimation(targetNum: string, cfg: WheelConfig){
-    const pockets = cfg.pockets?.length ? cfg.pockets : EURO_POCKETS;
-    const step = cfg.step || STEP;
-    const assetOffset = (cfg.assetOffsetRad ?? WHEEL_ASSET_OFFSET);
-    const targetIdx = pockets.indexOf(targetNum);
-    const targetAngle = targetIdx >= 0 ? targetIdx * step : 0;
+  async function joinTable(t: TableSummary){
+    try {
+      if (ws) { try { ws.close(); } catch {} }
+      await api(`/poker/join`, { method: "POST", body: JSON.stringify({ tableId: t.id }) });
+      setSelected(t);
+      openWs(t.id);
+    } catch (e: any) {
+      setError(e?.message || "Failed to join table");
+    }
+  }
 
-    const wheelStart = Math.random() * Math.PI * 2;
-    const ballStart = Math.random() * Math.PI * 2;
-    const wheelRevs = 2 + Math.floor(Math.random() * 2); // 2..3
-    const duration = 6.5 * 1000;
-
-    const wheelEnd = wheelStart + wheelRevs * Math.PI * 2;
-    const ballEndBase = wheelEnd + targetAngle; // ensures relative landing
-    const ballEnd = ballEndBase;
-
-    const start = performance.now();
-    let lastTickK = -1;
-
-    cancelAnimationFrame(rafRef.current);
-    const loop = (now: number) => {
-      const t = Math.min(1, (now - start) / duration);
-      const easeOut = 1 - Math.pow(1 - t, 3);
-      const ballEase = 1 - Math.pow(1 - Math.min(1, t * 1.05), 3);
-      // Small damped oscillation in last 12%
-      const wobble = t > 0.88 ? (Math.sin((t - 0.88) * 30) * Math.exp(-(t - 0.88) * 24) * (step * 0.35)) : 0;
-
-      const wheelAngle = wheelStart + (wheelEnd - wheelStart) * easeOut + assetOffset;
-      const ballAngle = ballStart + (ballEnd - ballStart) * ballEase + wobble + assetOffset;
-
-      // Tick when passing pocket separators based on (ball - wheel) / step
-      const rel = (ballAngle - wheelAngle) / step;
-      const k = Math.floor(rel);
-      if (k !== lastTickK) { lastTickK = k; tickSound(); }
-
-      // Blur wheel more when fast (early t)
-      const blur = (1 - easeOut) * 3.5; // px
-      if (wheelRef.current) {
-        const deg = (wheelAngle * 180) / Math.PI;
-        wheelRef.current.style.transform = `rotate(${deg}deg)`;
-        wheelRef.current.style.filter = `blur(${blur.toFixed(2)}px)`;
-      }
-      if (ballRef.current) {
-        const deg = (ballAngle * 180) / Math.PI;
-        const radius = 120; // px from center
-        const x = Math.cos(ballAngle) * radius;
-        const y = Math.sin(ballAngle) * radius;
-        ballRef.current.style.transform = `translate(${x}px, ${y}px) rotate(${deg}deg)`;
-      }
-      if (glowRef.current) {
-        const deg = ((wheelStart + (wheelEnd - wheelStart) * easeOut + targetAngle + assetOffset) * 180) / Math.PI;
-        glowRef.current.style.transform = `translate(-50%, -50%) rotate(${deg}deg)`;
-        glowRef.current.style.opacity = t > 0.9 ? "1" : "0";
-      }
-      if (hudTextRef.current) {
-        const remaining = Math.max(0, duration - (now - start));
-        hudTextRef.current.textContent = t < 1 ? `Spinning… ${(remaining/1000).toFixed(1)}s` : `Result: ${targetNum}`;
-      }
-
-      if (t < 1) rafRef.current = requestAnimationFrame(loop);
-      else {
-        cancelAnimationFrame(rafRef.current);
-        onSpinComplete();
-      }
+  function openWs(tableId: string){
+    try { if (ws) ws.close(); } catch {}
+    // Derive WS URL from API_BASE. Supports absolute (http://host[:port]/path) or relative (/api).
+    const apiBase = API_BASE || "/api";
+    let baseUrl: URL;
+    if (/^https?:\/\//i.test(apiBase)) {
+      baseUrl = new URL(apiBase);
+    } else {
+      baseUrl = new URL(apiBase, window.location.origin);
+    }
+    const wsProto = baseUrl.protocol === "https:" ? "wss:" : "ws:";
+    const pathBase = baseUrl.pathname.replace(/\/$/, "");
+    const wsUrl = `${wsProto}//${baseUrl.host}${pathBase}/poker/ws/${tableId}`;
+    const socket = new WebSocket(wsUrl);
+    socket.onopen = () => { setWs(socket); setConnectedTableId(tableId); };
+    socket.onmessage = (ev) => {
+      try {
+        const msg: WsEvent = JSON.parse(ev.data);
+        handleWsEvent(msg);
+      } catch {}
     };
-    rafRef.current = requestAnimationFrame(loop);
+    socket.onclose = () => { setWs(null); setConnectedTableId(null); setSeats([]); setHand(null); };
   }
 
-  async function onSpinComplete(){
-    try {
-      if (!spinId) return;
-      const res = await api<SettleResp>(`/roulette/settle`, { method: "POST", body: JSON.stringify({ spinId }) });
-      setSeed(res.seed);
-      setPayouts(res.payouts);
-      if (me) setMe({ ...me, balance_cents: res.newBalance });
-      setPhase("settling");
-    } catch (e: any) {
-      setError(e?.message || "Failed to settle");
-      setPhase("betting");
+  // Join/Leave handled from lobby list
+
+  function handleWsEvent(msg: WsEvent){
+    if (msg.type === "TABLE_SNAPSHOT"){
+      setSelected({
+        id: msg.state.table.id,
+        name: msg.state.table.name,
+        isPrivate: false,
+        smallBlind: msg.state.table.smallBlind,
+        bigBlind: msg.state.table.bigBlind,
+        minBuyIn: msg.state.table.minBuyIn,
+        maxBuyIn: msg.state.table.maxBuyIn,
+        maxSeats: msg.state.table.maxSeats,
+        seatsTaken: 0,
+        status: msg.state.hand ? "running" : "waiting"
+      });
+      setSeats(msg.state.seats);
+      setHand(msg.state.hand);
+      // determine my seat
+      const my = msg.state.seats.find(s => s.user_id === me?.id);
+      setMySeat(my ? my.seat_no : null);
+      // If we requested a sit with buy-in, complete once seated
+      if (awaitingBuyIn.current && my && my.seat_no === awaitingBuyIn.current.seatNo){
+        sendWs({ type: 'BUY_IN', amount: awaitingBuyIn.current.amount });
+        awaitingBuyIn.current = null;
+        setShowSitModal(false);
+      }
+    } else if (msg.type === "PLAYER_SEATED"){
+      // seat updates come via snapshot too
+    } else if (msg.type === "BUY_IN_APPLIED"){
+      // buying in updates snapshot separately; refresh wallet
+      try { fetchMe(); } catch {}
+    } else if (msg.type === "POT_AWARDED"){
+      // animate pot to winner seat
+      try {
+        if (!potRef.current) return;
+        const target = seatRefs.current[msg.seatNo!];
+        if (!target) return;
+        const s = potRef.current.getBoundingClientRect();
+        const { flights } = buildChipFlights(msg.amount, s, target, { chipSize: 24, interDelay: 60, maxChips: 10 });
+        setFlyingChips(flights);
+        setTimeout(() => setFlyingChips([]), 1200);
+      } catch {}
+    } else if (msg.type === "CASH_OUT_OK"){
+      // animate seat stack to nav balance
+      try {
+        const target = getNavBalanceTarget();
+        const src = mySeat != null ? seatRefs.current[mySeat] : null;
+        if (target && src){
+          const rect = src.getBoundingClientRect();
+          const { flights } = buildChipFlights(msg.amount, rect, target, { chipSize: 24, interDelay: 60, maxChips: 10 });
+          setFlyingChips(flights);
+          setTimeout(() => setFlyingChips([]), 1200);
+        }
+      } catch {}
+      if (me) setMe({ ...me, balance_cents: msg.newBalance });
+      fetchMe();
+    } else if (msg.type === 'ERROR'){
+      setError(msg.reason || 'Action failed');
     }
   }
 
-  async function submitBets(){
-    setError(null);
-    if (phase !== "betting") return;
-    if (bets.length === 0) { setError("Place at least one bet"); return; }
-    try {
-      setPhase("spinning");
-      const body = { tableId: "main", bets: bets.map(b => ({ type: b.type, target: b.target, amount_cents: b.amount_cents })) };
-      const res = await api<StartResp>(`/roulette/start`, { method: "POST", body: JSON.stringify(body) });
-      setCommitHash(res.commitHash);
-      setSpinId(res.spinId);
-      setTargetNumber(res.targetNumber);
-      setWheelCfg(res.wheelConfig);
-      // Fire the animation deterministically
-      runSpinAnimation(res.targetNumber, res.wheelConfig || { pockets: EURO_POCKETS, step: STEP, assetOffsetRad: WHEEL_ASSET_OFFSET });
-    } catch (e: any) {
-      setError(e?.message || "Failed to start roulette round");
-      setPhase("betting");
+  function sendWs(msg: any){
+    try { ws?.send(JSON.stringify(msg)); } catch {}
+  }
+
+  function takeSeat(seatNo: number){
+    setPendingSeat(seatNo);
+    setSitDollars(((selected?.minBuyIn ?? 0)/100).toFixed(2));
+    setShowSitModal(true);
+  }
+  function confirmSit(){
+    const dollars = Number(sitDollars || '0');
+    const amount = Math.max(0, Math.round(dollars * 100));
+    if (!me || (me.balance_cents ?? 0) < amount){ setError('Insufficient balance'); return; }
+    if (pendingSeat != null){
+      awaitingBuyIn.current = { seatNo: pendingSeat, amount };
+      sendWs({ type: 'SEAT_TAKE', seatNo: pendingSeat });
+    } else {
+      // Top-up while seated
+      sendWs({ type: 'BUY_IN', amount });
+      setShowSitModal(false);
     }
   }
+  function cancelSit(){ setShowSitModal(false); setPendingSeat(null); }
+  function cashOut(){ sendWs({ type: "CASH_OUT" }); }
 
-  function nextRound(){
-    setPhase("betting");
-    setBets([]);
-    setSpinId(null); setCommitHash(null); setSeed(null); setTargetNumber(null);
-    setPayouts([]);
-  }
-
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
-
-  // UI helpers
-  const canSubmit = phase === "betting" && bets.length > 0 && totalWager > 0;
-  const targetColor = targetNumber ? (targetNumber === "0" ? "G" : (Number(targetNumber) % 2 === 0 ? "B" : "R")) : null;
+  const seatedMe = useMemo(() => seats.find(s => s.user_id === me?.id) ?? null, [seats, me?.id]);
+  const potCents = hand?.pot ?? 0;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(280px,520px)_1fr] gap-6">
-      {/* Left: Wheel */}
-      <div className="relative rounded-2xl bg-card/70 border border-white/10 p-4">
-        <div className="text-lg font-semibold mb-3">Wheel</div>
-        <div className="relative mx-auto" style={{ width: 320, height: 320 }}>
-          {/* Centered origin wrapper (fixed size to avoid 0x300 issue) */}
-          <div className="absolute left-1/2 top-1/2 relative" style={{ transform: "translate(-50%, -50%)", width: 300, height: 300 }}>
-            <div ref={wheelRef} className="will-change-transform absolute inset-0" style={{ transformOrigin: '50% 50%' }}>
-              <img src="/roulette/roulette_wheel.webp" alt="Roulette Wheel" width={300} height={300} draggable={false} style={{ width: 300, height: 300, display: 'block' }} onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
-            </div>
-            {/* Winner glow wedge */}
-            <div ref={glowRef} className="pointer-events-none absolute left-1/2 top-1/2 will-change-transform" style={{ width: 300, height: 300, transform: 'translate(-50%, -50%)', opacity: 0 }}>
-              <div className="absolute left-1/2 top-1/2" style={{ transform: 'translate(-50%, -50%)' }}>
-                <div style={{ width: 300, height: 300, borderRadius: '50%', background: 'conic-gradient(from 0deg, rgba(255,255,255,0) 0deg, rgba(255,255,255,0) 174deg, rgba(255,255,255,0.25) 180deg, rgba(255,255,255,0) 186deg, rgba(255,255,255,0) 360deg)' }} />
+    <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6">
+      <div className="rounded-2xl bg-card border border-white/10 p-4">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-xl font-bold">Texas Hold'em</div>
+          <div className="text-sm text-white/70">Blinds: ${(selected?.smallBlind ?? 0)/100}/${(selected?.bigBlind ?? 0)/100}</div>
+        </div>
+        <div className="text-xs text-white/60 mb-3">Main table is always open and public for quick play.</div>
+
+        {/* Table */}
+        <div className="relative h-[480px] rounded-2xl bg-gradient-to-b from-emerald-900/40 to-emerald-800/30 border border-white/10">
+          {ws && (
+            <>
+              {/* Pot */}
+              <div ref={potRef} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center">
+                <div className="text-xs text-white/70">Pot</div>
+                <ChipStack amountCents={potCents} chipSize={28} />
+                <div className="text-white/80 text-sm mt-1">${(potCents/100).toFixed(2)}</div>
               </div>
-            </div>
-            {/* Ball */}
-            <div ref={ballRef} className="absolute left-1/2 top-1/2 will-change-transform" style={{ width: 10, height: 10, marginLeft: -5, marginTop: -5, borderRadius: 9999, background: '#fafafa', boxShadow: '0 0 6px rgba(255,255,255,0.7), 0 0 14px rgba(255,255,255,0.35)' }} />
-          </div>
-          {/* HUD */}
-          <div className="absolute bottom-2 left-2 right-2 text-center text-sm text-white/80">
-            <div ref={hudTextRef}>{phase === 'spinning' ? 'Spinning…' : phase === 'settling' ? (targetNumber ? `Result: ${targetNumber}` : '') : 'Place your bets'}</div>
-          </div>
+
+              {/* Board cards */}
+              <div className="absolute left-1/2 top-[38%] -translate-x-1/2 flex gap-2">
+                {(hand?.board ?? []).map((c, i) => (
+                  <Card key={i} rank={String(c[0])} suit={c[1]} />
+                ))}
+              </div>
+
+              {/* Seats around table */}
+              {seats.map((s, idx) => {
+                const angle = (idx / (seats.length || 6)) * Math.PI * 2;
+                const radius = 180;
+                const cx = 240 + Math.cos(angle) * radius;
+                const cy = 220 + Math.sin(angle) * radius;
+                const isMe = s.user_id === me?.id;
+                return (
+                  <div
+                    key={idx}
+                    ref={(el) => (seatRefs.current[idx] = el)}
+                    className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-xl border ${isMe ? 'border-accent' : 'border-white/10'} bg-black/30 px-3 py-2`}
+                    style={{ left: cx, top: cy }}
+                  >
+                    <div className="text-sm font-semibold">{s.username || 'Empty'}</div>
+                    <div className="mt-1"><ChipStack amountCents={s.stack} chipSize={20} /></div>
+                    <div className="text-xs text-white/70 mt-0.5">${(s.stack/100).toFixed(2)}</div>
+                    {!s.user_id && (
+                      <Button className="mt-1 px-2 py-1" onClick={() => takeSeat(idx)}>Take</Button>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Stand Up (Cash Out) button */}
+              {mySeat != null && (
+                <div className="absolute bottom-4 right-4">
+                  <Button onClick={cashOut} className="px-3 py-2 bg-red-600 hover:bg-red-500 text-white border border-red-500/40">Stand Up (Cash Out)</Button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Connected hint */}
+        {ws && !seatedMe && (
+          <div className="mt-4 text-white/70">Pick a seat to start.</div>
+        )}
+
+        {error && <div className="text-danger mt-2 text-sm">{error}</div>}
+      </div>
+
+      <div className="rounded-2xl bg-card border border-white/10 p-4">
+        <div className="text-white/70 text-sm mb-2">Table Lobby</div>
+        <div className="space-y-2">
+          {tables.map(t => {
+            const joined = connectedTableId === t.id && !!ws;
+            return (
+              <div key={t.id} className={`rounded-lg border ${selected?.id === t.id ? 'border-accent' : 'border-white/10'} p-3 flex items-center justify-between`}>
+                <div>
+                  <div className="font-semibold">{t.name}</div>
+                  <div className="text-xs text-white/70">{t.seatsTaken}/{t.maxSeats} seats • Blinds ${(t.smallBlind/100).toFixed(2)}/${(t.bigBlind/100).toFixed(2)}</div>
+                </div>
+                {!joined ? (
+                  <Button onClick={() => joinTable(t)} className="px-3 py-1">Join</Button>
+                ) : (
+                  <Button onClick={() => { try { ws?.close(); } catch {}; setWs(null); setConnectedTableId(null); setSeats([]); setHand(null); }} className="px-3 py-1 bg-red-600 hover:bg-red-500 border-red-500/40">Leave</Button>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* Right: Betting + Summary */}
-      <div className="flex flex-col gap-4">
-        {/* Bets panel */}
-        <div className="rounded-2xl bg-card/70 border border-white/10 p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-lg font-semibold">Bets</div>
-            {phase === 'betting' && (
-              <button onClick={clearBets} className="text-white/70 hover:text-white text-sm">Clear</button>
-            )}
+      <ChipFlightOverlay flights={flyingChips} chipSize={28} durationMs={500} />
+
+      {/* Sit Down Modal (dollars) */}
+      {showSitModal && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60">
+          <div className="w-[360px] rounded-xl bg-card border border-white/10 p-4">
+            <div className="text-lg font-semibold mb-2">Sit Down</div>
+            <div className="text-sm text-white/70 mb-2">Enter buy-in amount in dollars.</div>
+            <div className="flex items-center gap-2">
+              <span className="text-white/80">$</span>
+              <input type="number" min={(selected?.minBuyIn ?? 0)/100} max={(selected?.maxBuyIn ?? 0)/100} step={0.01} value={sitDollars}
+                onChange={(e) => setSitDollars(e.target.value)}
+                className="w-40 rounded-md bg-black/30 border border-white/10 px-2 py-1 text-white/90" placeholder="0.00" />
+              <div className="text-xs text-white/60">Min: {((selected?.minBuyIn ?? 0)/100).toFixed(2)} • Max: {((selected?.maxBuyIn ?? 0)/100).toFixed(2)}</div>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <Button variant="secondary" onClick={cancelSit}>Cancel</Button>
+              <Button onClick={confirmSit} disabled={!me || Number(sitDollars || '0') <= 0 || (me?.balance_cents ?? 0) < Math.round(Number(sitDollars||'0')*100) || (pendingSeat != null && ((Math.round(Number(sitDollars||'0')*100) < (selected?.minBuyIn ?? 0)) || (Math.round(Number(sitDollars||'0')*100) > (selected?.maxBuyIn ?? Infinity))))}>Confirm</Button>
+            </div>
           </div>
-          <div className="mb-3">
-            <ChipSelector onChange={setSelectedAmount} />
-          </div>
-          <div className="grid grid-cols-12 gap-1 select-none">
-            {/* 0 cell spanning 2 columns */}
-            <BetCell disabled={phase!=="betting"} label="0" color="G" onClick={() => addBet({ type: 'straight', target: '0', amount_cents: selectedAmount })} className="col-span-2" />
-            {/* 1..36 cells */}
-            {Array.from({ length: 36 }).map((_, i) => {
-              const n = (i + 1).toString();
-              const color = [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36].includes(i+1) ? 'R' : 'B';
-              return (
-                <BetCell key={n} disabled={phase!=="betting"} label={n} color={color} onClick={() => addBet({ type: 'straight', target: n, amount_cents: selectedAmount })} />
-              );
-            })}
-          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+

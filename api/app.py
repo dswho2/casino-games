@@ -9,6 +9,7 @@ from .security import current_user
 from .models import User  # ensure models import for table creation
 from .games.blackjack import router as blackjack_router
 from .games.roulette import router as roulette_router
+from .games.poker import router as poker_router
 
 def _load_env_from_file():
     # Load api/.env into process env for local/dev. In production (e.g. Vercel),
@@ -56,3 +57,4 @@ app.include_router(auth_router)
 app.include_router(wallet_router)
 app.include_router(blackjack_router)
 app.include_router(roulette_router)
+app.include_router(poker_router)

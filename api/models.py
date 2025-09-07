@@ -9,6 +9,7 @@ class GameType(PyEnum):
     blackjack = "blackjack"
     roulette = "roulette"
     slots = "slots"
+    poker = "poker"
 
 class Outcome(PyEnum):
     win = "win"

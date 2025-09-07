@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 
 type Game = {
-  slug: "blackjack" | "roulette" | "slots";
+  slug: "blackjack" | "roulette" | "poker" | "slots";
   title: string;
   image: string; // path under public/
   badge?: string;
@@ -11,6 +11,7 @@ type Game = {
 const GAMES: Game[] = [
   { slug: "blackjack", title: "Blackjack", image: "/games/blackjack.webp", badge: "Popular", featured: true },
   { slug: "roulette", title: "Roulette", image: "/games/roulette.webp", badge: "New" },
+  { slug: "poker", title: "Texas Hold'em", image: "/games/poker.webp", badge: "Main table" },
   { slug: "slots", title: "Slots", image: "/games/slots.webp" },
 ];
 
