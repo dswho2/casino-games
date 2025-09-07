@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, API_BASE } from "../../api/client";
 import Button from "../../components/Button";
 import Card from "../../components/Card";
@@ -9,6 +9,9 @@ import {
   getNavBalanceTarget,
 } from "../../components/ChipFlight";
 import { useAuthStore } from "../../store/auth";
+
+/** ---------- Config ---------- */
+const MIN_INTER_HAND_MS = 8000; // client-side minimum pause between hands
 
 /** ---------- Types ---------- */
 
@@ -115,7 +118,16 @@ type WsEvent =
       toCallNext: number;
     }
   | { type: "POT_AWARDED"; potIndex: number; seatNo: number; amount: number }
-  | { type: "SHOWDOWN"; hands: any; pots: any }
+  | {
+      type: "SHOWDOWN";
+      hands?: Array<{
+        seatNo: number;
+        cards?: [[Rank, Suit], [Rank, Suit]];
+        hole?: [[Rank, Suit], [Rank, Suit]];
+        folded?: boolean;
+      }>;
+      pots?: any;
+    }
   | { type: "HAND_ENDED"; nextDealerSeat: number; seed?: string; waitMs?: number }
   | { type: "CASHED_OUT"; seatNo: number; amount: number }
   | { type: "CASH_OUT_OK"; amount: number; newBalance: number }
@@ -138,30 +150,27 @@ function buildWsUrl(path: string) {
   return `${wsProto}//${baseUrl.host}${pathBase}${path}`;
 }
 
-/** Small helpers for hand naming (client-only, simplified) */
-const RANK_LABEL: Record<number, string> = {
+/** Display ranks (A K Q J 10 …) for the Card component */
+const DISPLAY_RANK: Record<number, string> = {
   14: "A",
   13: "K",
   12: "Q",
   11: "J",
-  10: "10",
-  9: "9",
-  8: "8",
-  7: "7",
-  6: "6",
-  5: "5",
-  4: "4",
-  3: "3",
-  2: "2",
 };
+function displayRank(r: number): string {
+  return DISPLAY_RANK[r] ?? String(r);
+}
 
-function labelBestHand(hole?: [[Rank, Suit], [Rank, Suit]], board?: [Rank, Suit][]) {
+/** Hand label helper: TYPE ONLY (no ranks) */
+function labelBestHand(
+  hole?: [[Rank, Suit], [Rank, Suit]],
+  board?: [Rank, Suit][]
+) {
   if (!hole || hole.length !== 2) return "";
   const cards = [...hole, ...(board ?? [])];
   const ranks = cards.map((c) => c[0]);
   const suits = cards.map((c) => c[1]);
 
-  // Counts
   const rc: Record<number, number> = {};
   for (const r of ranks) rc[r] = (rc[r] || 0) + 1;
   const sc: Record<string, number> = {};
@@ -169,7 +178,6 @@ function labelBestHand(hole?: [[Rank, Suit], [Rank, Suit]], board?: [Rank, Suit]
 
   const isFlush = Object.values(sc).some((v) => v >= 5);
 
-  // Straight-ish check
   const uniq = Array.from(new Set(ranks)).sort((a, b) => b - a);
   const seq = [...uniq, uniq.includes(14) ? 1 : null].filter(Boolean) as number[];
   let straightHigh = 0;
@@ -183,32 +191,192 @@ function labelBestHand(hole?: [[Rank, Suit], [Rank, Suit]], board?: [Rank, Suit]
     }
   }
 
-  const pairs = Object.entries(rc)
-    .filter(([, c]) => c === 2)
-    .map(([r]) => Number(r))
-    .sort((a, b) => b - a);
-  const trips = Object.entries(rc)
-    .filter(([, c]) => c === 3)
-    .map(([r]) => Number(r))
-    .sort((a, b) => b - a);
-  const quads = Object.entries(rc)
-    .filter(([, c]) => c === 4)
-    .map(([r]) => Number(r))
-    .sort((a, b) => b - a);
+  const counts = Object.values(rc);
+  const pairs = counts.filter((c) => c === 2).length;
+  const trips = counts.filter((c) => c === 3).length;
+  const quads = counts.filter((c) => c === 4).length;
 
-  if (isFlush && straightHigh) return `Straight Flush`;
-  if (quads.length) return `Four of a Kind ${RANK_LABEL[quads[0]]}`;
-  if (trips.length && (trips.length >= 2 || pairs.length)) return `Full House`;
-  if (isFlush) return `Flush`;
-  if (straightHigh) return `Straight`;
-  if (trips.length) return `Three of a Kind ${RANK_LABEL[trips[0]]}`;
-  if (pairs.length >= 2) return `Two Pair ${RANK_LABEL[pairs[0]]}-${RANK_LABEL[pairs[1]]}`;
-  if (pairs.length === 1) return `Pair ${RANK_LABEL[pairs[0]]}`;
-
-  // High card
-  const top = uniq[0];
-  return `High Card ${RANK_LABEL[top]}`;
+  if (isFlush && straightHigh) return "Straight Flush";
+  if (quads) return "Four of a Kind";
+  if (trips && (trips >= 2 || pairs)) return "Full House";
+  if (isFlush) return "Flush";
+  if (straightHigh) return "Straight";
+  if (trips) return "Three of a Kind";
+  if (pairs >= 2) return "Two Pair";
+  if (pairs === 1) return "One Pair";
+  return "High Card";
 }
+
+/** Determine best-five selection for highlighting */
+function pickBestFive(
+  hole?: [[Rank, Suit], [Rank, Suit]],
+  board?: [Rank, Suit][]
+): {
+  hand: string;
+  boardIdx: number[];
+  holeMask: [boolean, boolean];
+} {
+  const handName = labelBestHand(hole, board);
+  if (!hole || !board || board.length === 0) {
+    return { hand: handName, boardIdx: [], holeMask: [false, false] };
+  }
+
+  type Src = { rank: Rank; suit: Suit; src: "B" | "H"; idx: number };
+  const bList: Src[] = board.map((c, i) => ({ rank: c[0], suit: c[1], src: "B", idx: i }));
+  const hList: Src[] = hole.map((c, i) => ({ rank: c[0], suit: c[1], src: "H", idx: i })) as Src[];
+  const all: Src[] = [...bList, ...hList];
+
+  const byRank = new Map<number, Src[]>();
+  for (const c of all) {
+    if (!byRank.has(c.rank)) byRank.set(c.rank, []);
+    byRank.get(c.rank)!.push(c);
+  }
+
+  const bySuit = new Map<Suit, Src[]>();
+  for (const c of all) {
+    if (!bySuit.has(c.suit)) bySuit.set(c.suit, []);
+    bySuit.get(c.suit)!.push(c);
+  }
+
+  const resultB = new Set<number>();
+  const resultH = new Set<number>();
+  const take = (c: Src) => {
+    if (c.src === "B") resultB.add(c.idx);
+    else resultH.add(c.idx);
+  };
+
+  const sortedRanksDesc = Array.from(new Set(all.map((c) => c.rank))).sort((a, b) => b - a);
+
+  function straightFrom(cards: Src[]): Src[] | null {
+    const uniqRanks = Array.from(new Set(cards.map((c) => c.rank))).sort((a, b) => b - a);
+    const withWheel = uniqRanks.includes(14) ? [...uniqRanks, 1] : uniqRanks;
+    let run: number[] = [];
+    let best: number[] | null = null;
+    for (let i = 0; i < withWheel.length; i++) {
+      if (i === 0 || withWheel[i] === withWheel[i - 1] - 1) {
+        run.push(withWheel[i]);
+      } else {
+        run = [withWheel[i]];
+      }
+      if (run.length >= 5) {
+        best = run.slice(run.length - 5);
+        break;
+      }
+    }
+    if (!best) return null;
+    const out: Src[] = [];
+    for (let ri = 0; ri < best.length; ri++) {
+      const want = best[ri] === 1 ? 14 : best[ri];
+      const candidates = cards.filter((c) => c.rank === want);
+      const pick =
+        candidates.find((c) => c.src === "H" && !out.includes(c)) ||
+        candidates.find((c) => !out.includes(c));
+      if (pick) out.push(pick);
+    }
+    return out.length === 5 ? out : null;
+  }
+
+  const flushSuitEntry = Array.from(bySuit.entries()).find(([, arr]) => arr.length >= 5);
+  const flushCards = flushSuitEntry ? flushSuitEntry[1].slice().sort((a, b) => b.rank - a.rank) : null;
+  const straightCards = straightFrom(all);
+  const straightFlushCards = flushCards ? straightFrom(flushCards) : null;
+
+  const rankCounts = sortedRanksDesc.map((r) => ({
+    rank: r,
+    count: byRank.get(r)?.length ?? 0,
+  }));
+  const quads = rankCounts.find((x) => x.count === 4);
+  const tripsAll = rankCounts.filter((x) => x.count === 3);
+  const pairsAll = rankCounts.filter((x) => x.count === 2);
+
+  const handNameCase = handName;
+  switch (handNameCase) {
+    case "Straight Flush":
+      if (straightFlushCards) straightFlushCards.forEach(take);
+      break;
+    case "Four of a Kind":
+      if (quads) byRank.get(quads.rank)!.forEach(take);
+      break;
+    case "Full House": {
+      const trips = tripsAll[0];
+      const pair = tripsAll.length > 1 ? tripsAll[1] : pairsAll[0];
+      if (trips) byRank.get(trips.rank)!.slice(0, 3).forEach(take);
+      if (pair) byRank.get(pair.rank)!.slice(0, 2).forEach(take);
+      break;
+    }
+    case "Flush":
+      if (flushCards) flushCards.slice(0, 5).forEach(take);
+      break;
+    case "Straight":
+      if (straightCards) straightCards.forEach(take);
+      break;
+    case "Three of a Kind":
+      if (tripsAll[0]) byRank.get(tripsAll[0].rank)!.slice(0, 3).forEach(take);
+      break;
+    case "Two Pair": {
+      const p1 = pairsAll[0];
+      const p2 = pairsAll[1];
+      if (p1) byRank.get(p1.rank)!.slice(0, 2).forEach(take);
+      if (p2) byRank.get(p2.rank)!.slice(0, 2).forEach(take);
+      break;
+    }
+    case "One Pair":
+      if (pairsAll[0]) byRank.get(pairsAll[0].rank)!.slice(0, 2).forEach(take);
+      break;
+    default:
+      // High card: prefer highlighting hole cards
+      board?.length;
+      hList.forEach(take);
+      break;
+  }
+
+  return {
+    hand: handName,
+    boardIdx: Array.from(resultB.values()).sort((a, b) => a - b),
+    holeMask: [resultH.has(0), resultH.has(1)],
+  };
+}
+
+/** If the best hand is a Flush / Straight Flush, return the suit used */
+function detectFlushSuit(
+  hole?: [[Rank, Suit], [Rank, Suit]],
+  board?: [Rank, Suit][]
+): Suit | null {
+  if (!hole || !board) return null;
+  const suits = [...hole, ...board].map((c) => c[1]);
+  const counts: Record<Suit, number> = { S: 0, H: 0, D: 0, C: 0 };
+  suits.forEach((s) => (counts[s] += 1));
+  const suit = (["S", "H", "D", "C"] as Suit[]).find((s) => counts[s] >= 5) ?? null;
+  if (!suit) return null;
+  const type = labelBestHand(hole, board);
+  return type === "Flush" || type === "Straight Flush" ? suit : null;
+}
+
+/** CSS conic-gradient timer ring */
+function ringStyle(deg: number): React.CSSProperties {
+  const s: any = {
+    background: `conic-gradient(from -90deg, var(--accent, #22d3ee) ${deg}deg, transparent 0)`,
+    WebkitMask: "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+    mask: "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+    WebkitMaskComposite: "xor",
+    padding: "6px",
+  };
+  s.maskComposite = "exclude";
+  return s;
+}
+
+const dollars = (cents: number) => (cents / 100).toFixed(2);
+
+/** ---------- Showdown state ---------- */
+type ShowdownState = {
+  revealed: Record<number, [[Rank, Suit], [Rank, Suit]]>; // seatNo -> hole (visible by default)
+  folded: Record<number, [[Rank, Suit], [Rank, Suit]]>; // seatNo -> hole (folded; hidden by default)
+  winners: { seatNo: number; amount: number }[];
+  awards: { seatNo: number; amount: number; potIndex?: number }[];
+  board: [Rank, Suit][];
+  pot: number;
+  until: number | null;
+};
 
 /** ---------- Component ---------- */
 
@@ -269,6 +437,7 @@ export default function PokerTable() {
   const [toCall, setToCall] = useState<number>(0); // cents
   const [minRaise, setMinRaise] = useState<number>(0); // cents
   const [deadline, setDeadline] = useState<number | null>(null); // epoch ms
+  const [turnTotalMs, setTurnTotalMs] = useState<number>(0); // total ms for ring
   const [betInput, setBetInput] = useState<string>(""); // dollars string
   const [countdownNow, setCountdownNow] = useState<number>(Date.now());
 
@@ -287,6 +456,15 @@ export default function PokerTable() {
   // Lock actions during board reveals
   const [revealLocked, setRevealLocked] = useState(false);
 
+  // Showdown (post-hand view)
+  const [showdown, setShowdown] = useState<ShowdownState | null>(null);
+
+  // Aggregate winners as POT_AWARDED arrives
+  const winnersAggRef = useRef<Record<number, number>>({});
+
+  // Track if any hand has started (for Start Game button)
+  const [hasAnyHandStarted, setHasAnyHandStarted] = useState(false);
+
   // keep ticking
   useEffect(() => {
     const t = window.setInterval(() => setCountdownNow(Date.now()), 120);
@@ -301,6 +479,13 @@ export default function PokerTable() {
   }, [hand?.players]);
 
   const myPlayer = mySeat != null ? playersBySeat.get(mySeat) || null : null;
+
+  // local toggles for showing folded hands
+  const [showFoldedMap, setShowFoldedMap] = useState<Record<number, boolean>>(
+    {}
+  );
+  const toggleShowFolded = (seatNo: number) =>
+    setShowFoldedMap((prev) => ({ ...prev, [seatNo]: !prev[seatNo] }));
 
   useEffect(() => {
     fetchMe();
@@ -349,6 +534,10 @@ export default function PokerTable() {
     socket.onopen = () => {
       setWs(socket);
       setConnectedTableId(tableId);
+      // Prefer manual start if server supports it
+      try {
+        socket.send(JSON.stringify({ type: "SET_AUTOSTART", value: false }));
+      } catch {}
     };
     socket.onmessage = (ev) => {
       try {
@@ -363,14 +552,110 @@ export default function PokerTable() {
       setHand(null);
       setActionSeat(null);
       setDeadline(null);
+      setTurnTotalMs(0);
       setInterWaitUntil(null);
+      setBoardWriter("snapshot");
+      dealQRef.current = [];
+      handIdRef.current = null;
+      setShowdown(null);
+      winnersAggRef.current = {};
+      setHasAnyHandStarted(false);
+      setShowFoldedMap({});
     };
   }
+
+  /** ---------- Board writer model + reveal queue ---------- */
+
+  type CardT = [Rank, Suit];
+  type DealJob =
+    | { kind: "flop"; cards: CardT[]; handId: number }
+    | { kind: "turn" | "river"; card: CardT; handId: number };
+
+  const handIdRef = useRef<number | null>(null);
+
+  // Only one writer mutates board during a live hand.
+  const [boardWriter, setBoardWriter] = useState<"events" | "snapshot">("snapshot");
+
+  const dealQRef = useRef<DealJob[]>([]);
+  const dealRunningRef = useRef(false);
+
+  function enqueueDeal(job: DealJob) {
+    dealQRef.current.push(job);
+    if (!dealRunningRef.current) runDealWorker();
+  }
+
+  function wait(ms: number) {
+    return new Promise<void>((r) => setTimeout(r, ms));
+  }
+
+  async function runDealWorker() {
+    dealRunningRef.current = true;
+    try {
+      while (dealQRef.current.length) {
+        const job = dealQRef.current.shift()!;
+        if (handIdRef.current !== job.handId) continue;
+
+        setRevealLocked(true);
+        setActionSeat(null);
+        setDeadline(null);
+        setTurnTotalMs(0);
+
+        if (job.kind === "flop") {
+          setHand((prev) => (prev ? { ...prev, board: [], stage: "flop" } : prev));
+          for (let i = 0; i < job.cards.length; i++) {
+            await wait(i === 0 ? 120 : 140);
+            const c = job.cards[i];
+            setHand((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    board:
+                      prev.board.length >= 3
+                        ? prev.board.slice(0, 3)
+                        : [...prev.board, c],
+                  }
+                : prev
+            );
+          }
+        } else if (job.kind === "turn") {
+          await wait(180);
+          setHand((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  stage: "turn",
+                  board: prev.board.slice(0, 3).concat([job.card]),
+                }
+              : prev
+          );
+        } else {
+          await wait(180);
+          setHand((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  stage: "river",
+                  board: prev.board.slice(0, 4).concat([job.card]),
+                }
+              : prev
+          );
+        }
+
+        await wait(80);
+        setRevealLocked(false);
+      }
+    } finally {
+      dealRunningRef.current = false;
+    }
+  }
+
+  /** ---------- WS Dispatcher ---------- */
 
   function handleWsEvent(msg: WsEvent) {
     switch (msg.type) {
       case "TABLE_SNAPSHOT": {
-        const { table, seats, hand } = msg.state;
+        const { table, seats, hand: snapHand } = msg.state;
+
         setSelected((prev) => ({
           id: table.id,
           name: table.name,
@@ -381,22 +666,37 @@ export default function PokerTable() {
           maxBuyIn: table.maxBuyIn,
           maxSeats: table.maxSeats,
           seatsTaken: prev?.seatsTaken ?? 0,
-          status: hand ? "running" : "waiting",
+          status: snapHand ? "running" : "waiting",
         }));
         setSeats(seats);
-        setHand(hand);
+
+        if (snapHand) {
+          const changed = handIdRef.current == null || handIdRef.current !== snapHand.handId;
+          if (changed) {
+            handIdRef.current = snapHand.handId;
+            setBoardWriter("snapshot");
+            dealQRef.current = [];
+            setShowdown(null);
+            winnersAggRef.current = {};
+            setShowFoldedMap({});
+          }
+        }
+
+        setHand((prev) => {
+          if (!snapHand) return prev;
+          const board =
+            boardWriter === "snapshot" ? snapHand.board : (prev?.board ?? snapHand.board);
+          return { ...snapHand, board };
+        });
 
         const mine = seats.find((s) => sameId(s.user_id, me?.id));
         setMySeat(mine ? mine.seat_no : null);
         mySeatRef.current = mine ? mine.seat_no : null;
 
-        if (hand?.toAct != null) {
-          setActionSeat(hand.toAct);
-        } else {
-          setActionSeat(null);
+        if (snapHand?.toAct != null && boardWriter === "snapshot") {
+          setActionSeat(snapHand.toAct);
         }
 
-        // if we were waiting to buy-in and snapshot shows us seated, send it
         if (
           awaitingBuyIn.current &&
           mine &&
@@ -434,7 +734,6 @@ export default function PokerTable() {
           )
         );
 
-        // optimistic wallet update then refresh
         const mineSeat = seats.find((s) => s.seat_no === msg.seatNo);
         if (mineSeat && sameId(mineSeat.user_id, me?.id) && me) {
           setMe({
@@ -452,11 +751,21 @@ export default function PokerTable() {
       }
 
       case "ACTION_REQUIRED": {
+        const p = hand?.players?.find((x) => x.seatNo === msg.seatNo);
+        if (p && (p.hasFolded || p.isAllIn)) {
+          setActionSeat(null);
+          setDeadline(null);
+          setTurnTotalMs(0);
+          break;
+        }
+
         setActionSeat(msg.seatNo);
         setMinRaise(msg.minRaise);
         setToCall(msg.toCall);
-        setDeadline(Date.now() + (msg.timeLeftMs || 0));
-        // suggest next total bet
+        const ttl = msg.timeLeftMs || 0;
+        setDeadline(Date.now() + ttl);
+        setTurnTotalMs(ttl);
+
         const cb = hand?.curBet ?? 0;
         const target = Math.max(cb + msg.minRaise, cb);
         setBetInput((target / 100).toFixed(2));
@@ -470,14 +779,15 @@ export default function PokerTable() {
             : msg.action === "check"
             ? "Check"
             : msg.action === "call"
-            ? `Call $${(msg.amount / 100).toFixed(2)}`
+            ? `Call $${dollars(msg.amount)}`
             : msg.action === "bet"
-            ? `Bet $${(msg.amount / 100).toFixed(2)}`
-            : `Raise $${(msg.amount / 100).toFixed(2)}`;
+            ? `Bet $${dollars(msg.amount)}`
+            : `Raise $${dollars(msg.amount)}`;
         setLastActions((prev) => ({
           ...prev,
           [msg.seatNo]: { text, until: Date.now() + 2000 },
         }));
+
         setHand((prev) =>
           prev
             ? {
@@ -496,46 +806,151 @@ export default function PokerTable() {
               }
             : prev
         );
+
+        setActionSeat(null);
+        setDeadline(null);
+        setTurnTotalMs(0);
+
+        break;
+      }
+
+      case "HAND_STARTED": {
+        setBoardWriter("events");
+        dealQRef.current = [];
+        setRevealLocked(false);
+        setLastActions({});
+        setWinnerFlash({});
+        setShowdown(null);
+        winnersAggRef.current = {};
+        setHasAnyHandStarted(true);
+        setShowFoldedMap({});
+
+        setHand((prev) =>
+          prev
+            ? {
+                ...prev,
+                handId: msg.handId,
+                dealerSeat: msg.dealerSeat,
+                smallBlindSeat: msg.smallBlindSeat,
+                bigBlindSeat: msg.bigBlindSeat,
+                deckCommit: msg.deckCommit,
+                board: [],
+                pot: 0,
+                stage: "preflop",
+                curBet: 0,
+                minRaise: 0,
+                players: (prev.players ?? []).map((p) => ({
+                  ...p,
+                  streetBet: 0,
+                  hasFolded: false,
+                  isAllIn: false,
+                })),
+              }
+            : prev
+        );
+        handIdRef.current = msg.handId;
         break;
       }
 
       case "DEAL_FLOP": {
-        setRevealLocked(true);
-        msg.cards.forEach((card, i) => {
-          setTimeout(() => {
-            setHand((prev) =>
-              prev ? { ...prev, board: [...prev.board, card] } : prev
-            );
-            if (i === msg.cards.length - 1) setRevealLocked(false);
-          }, i * 120);
-        });
+        if (boardWriter !== "events" || !handIdRef.current) break;
+        setActionSeat(null);
+        setDeadline(null);
+        setTurnTotalMs(0);
+        enqueueDeal({ kind: "flop", cards: msg.cards, handId: handIdRef.current });
         break;
       }
 
       case "DEAL_TURN": {
-        setRevealLocked(true);
-        setTimeout(() => {
-          setHand((prev) =>
-            prev ? { ...prev, board: [...prev.board, msg.card] } : prev
-          );
-          setRevealLocked(false);
-        }, 300);
+        if (boardWriter !== "events" || !handIdRef.current) break;
+        setActionSeat(null);
+        setDeadline(null);
+        setTurnTotalMs(0);
+        enqueueDeal({ kind: "turn", card: msg.card, handId: handIdRef.current });
         break;
       }
 
       case "DEAL_RIVER": {
-        setRevealLocked(true);
-        setTimeout(() => {
-          setHand((prev) =>
-            prev ? { ...prev, board: [...prev.board, msg.card] } : prev
-          );
-          setRevealLocked(false);
-        }, 300);
+        if (boardWriter !== "events" || !handIdRef.current) break;
+        setActionSeat(null);
+        setDeadline(null);
+        setTurnTotalMs(0);
+        enqueueDeal({ kind: "river", card: msg.card, handId: handIdRef.current });
+        break;
+      }
+
+      case "SHOWDOWN": {
+        // Build revealed and folded maps
+        const revealed: Record<number, [[Rank, Suit], [Rank, Suit]]> = {};
+        const folded: Record<number, [[Rank, Suit], [Rank, Suit]]> = {};
+        if (Array.isArray(msg.hands)) {
+          for (const h of msg.hands) {
+            const seatNo = (h as any).seatNo;
+            const isFolded = (h as any).folded === true;
+            const cards = (h as any).cards ?? (h as any).hole ?? null;
+            if (
+              typeof seatNo === "number" &&
+              Array.isArray(cards) &&
+              cards.length === 2 &&
+              Array.isArray(cards[0]) &&
+              Array.isArray(cards[1])
+            ) {
+              if (isFolded) folded[seatNo] = cards as [[Rank, Suit], [Rank, Suit]];
+              else revealed[seatNo] = cards as [[Rank, Suit], [Rank, Suit]];
+            }
+          }
+        }
+
+        setShowdown((prev) => ({
+          revealed: { ...(prev?.revealed ?? {}), ...revealed },
+          folded: { ...(prev?.folded ?? {}), ...folded },
+          winners: prev?.winners ?? [],
+          awards: prev?.awards ?? [],
+          board: hand?.board ?? prev?.board ?? [],
+          pot: hand?.pot ?? prev?.pot ?? 0,
+          until: prev?.until ?? null,
+        }));
+
+        const atLeast = Date.now() + MIN_INTER_HAND_MS;
+        setInterWaitUntil((cur) => (!cur ? atLeast : Math.max(cur, atLeast)));
+
+        setActionSeat(null);
+        setDeadline(null);
+        setTurnTotalMs(0);
         break;
       }
 
       case "POT_AWARDED": {
-        // winner glow + chip flight
+        winnersAggRef.current[msg.seatNo] =
+          (winnersAggRef.current[msg.seatNo] ?? 0) + msg.amount;
+
+        setShowdown((prev) => {
+          const prevW = prev?.winners ?? [];
+          const idx = prevW.findIndex((w) => w.seatNo === msg.seatNo);
+          const nextW =
+            idx >= 0
+              ? prevW.map((w, i) =>
+                  i === idx ? { seatNo: w.seatNo, amount: w.amount + msg.amount } : w
+                )
+              : prevW.concat({ seatNo: msg.seatNo, amount: msg.amount });
+
+          const nextAwards = (prev?.awards ?? []).concat({
+            seatNo: msg.seatNo,
+            amount: msg.amount,
+            potIndex: msg.potIndex,
+          });
+
+          return {
+            revealed: prev?.revealed ?? {},
+            folded: prev?.folded ?? {},
+            winners: nextW,
+            awards: nextAwards,
+            board: hand?.board ?? prev?.board ?? [],
+            pot: hand?.pot ?? prev?.pot ?? 0,
+            until: prev?.until ?? null,
+          };
+        });
+
         setWinnerFlash((prev) => ({
           ...prev,
           [msg.seatNo]: Date.now() + 1400,
@@ -557,23 +972,24 @@ export default function PokerTable() {
       }
 
       case "HAND_ENDED": {
-        // show inter-hand countdown if provided
-        if (typeof msg.waitMs === "number" && msg.waitMs > 0) {
-          setInterWaitUntil(Date.now() + msg.waitMs);
-        } else {
-          setInterWaitUntil(null);
-        }
+        setBoardWriter("snapshot");
+        dealQRef.current = [];
+        setRevealLocked(false);
+
+        const wait = Math.max(MIN_INTER_HAND_MS, msg.waitMs ?? 0);
+        setInterWaitUntil(Date.now() + wait);
+
         setActionSeat(null);
         setDeadline(null);
+        setTurnTotalMs(0);
         break;
       }
 
       case "CASH_OUT_OK": {
         try {
           const target = getNavBalanceTarget();
-          const src =
-            mySeat != null ? seatRefs.current[mySeat] : null;
-        if (target && src) {
+          const src = mySeat != null ? seatRefs.current[mySeat] : null;
+          if (target && src) {
             const rect = src.getBoundingClientRect();
             const { flights } = buildChipFlights(msg.amount, rect, target, {
               chipSize: 24,
@@ -603,7 +1019,6 @@ export default function PokerTable() {
 
       case "ERROR": {
         const reason = (msg.reason || "").trim();
-        // ignore buy-in positive message that can race with hedged payloads
         if (/buy[- ]?in must be positive/i.test(reason)) break;
         setError(reason || "Action failed");
         break;
@@ -668,8 +1083,8 @@ export default function PokerTable() {
   }
 
   function confirmSit() {
-    const dollars = Number(sitDollars || "0");
-    const amountCents = Math.max(0, Math.round(dollars * 100));
+    const dollarsNum = Number(sitDollars || "0");
+    const amountCents = Math.max(0, Math.round(dollarsNum * 100));
 
     if (!me || (me.balance_cents ?? 0) < amountCents) {
       setError("Insufficient balance");
@@ -747,12 +1162,13 @@ export default function PokerTable() {
     [seats, me?.id]
   );
 
-  const potCents = hand?.pot ?? 0;
+  const potCents = hand?.pot ?? showdown?.pot ?? 0;
 
   // ------- Betting UI helpers -------
 
   const isMyTurn =
     actionSeat != null && mySeat != null && actionSeat === mySeat;
+
   const myCanAct =
     isMyTurn &&
     myPlayer &&
@@ -778,14 +1194,13 @@ export default function PokerTable() {
     sendWs(payload);
   }
 
-  // countdown 0..1 used
+  // countdown 0..1 used (accurate now)
   const countdownUsed = useMemo(() => {
-    if (!deadline) return 0;
+    if (!deadline || !turnTotalMs) return 0;
     const msLeft = Math.max(0, deadline - countdownNow);
-    const total = Math.max(1, (deadline - (deadline - (hand ? 0 : 0))));
-    const used = 1 - msLeft / Math.max(1, total);
+    const used = 1 - msLeft / Math.max(1, turnTotalMs);
     return Math.max(0, Math.min(1, used));
-  }, [deadline, countdownNow, hand?.handId]);
+  }, [deadline, turnTotalMs, countdownNow]);
 
   // inter-hand seconds left
   const interLeft = useMemo(() => {
@@ -793,7 +1208,7 @@ export default function PokerTable() {
     return Math.max(0, Math.ceil((interWaitUntil - Date.now()) / 1000));
   }, [interWaitUntil, countdownNow]);
 
-  // Hand label for me
+  // Hand label for me (TYPE ONLY)
   const myHandLabel = useMemo(
     () => labelBestHand(hand?.myHole, hand?.board),
     [hand?.myHole, hand?.board]
@@ -805,25 +1220,41 @@ export default function PokerTable() {
   const seatPositions = useMemo(() => {
     const count = selected?.maxSeats || seats.length || 6;
     const w = feltSize.w || 720;
-    const h = feltSize.h || 560;
+    const h = feltSize.h || 640;
+
     const centerX = w / 2;
-    const centerY = h * 0.58;
-    let radiusX = w * 0.36;
-    let radiusY = h * 0.38;
-    if (h < 400) radiusY *= 0.9;
+    const centerY = h * 0.54;
+
+    let radiusX = w * 0.42;
+    let radiusY = h * 0.44;
+
+    if (h < 460) radiusY *= 0.92;
+
     const list: { left: number; top: number; angle: number }[] = [];
     for (let i = 0; i < count; i++) {
       const angle = (i / count) * Math.PI * 2;
       let left = centerX + radiusX * Math.cos(angle);
       let top = centerY + radiusY * Math.sin(angle);
-      const safeTop = h * 0.25;
-      if (top < safeTop) top = safeTop + 24;
+
+      if (Math.sin(angle) < 0) top -= h * 0.04;
+
+      const s = Math.sin(angle);
+      if (s > 0.60) top -= h * 0.10;
+      else if (s > 0.20) top -= h * 0.07;
+
+      const safeTop = h * 0.14;
+      const safeBottom = h * 0.18;
+      if (top < safeTop) top = safeTop + 16;
+      if (top > h - safeBottom) top = h - safeBottom;
+
+      const padX = 88;
+      left = Math.max(padX, Math.min(w - padX, left));
+
       list.push({ left, top, angle });
     }
     return list;
   }, [selected?.maxSeats, seats.length, feltSize]);
 
-  // Utility: winner glow active?
   function winnerGlowClass(seatNo: number) {
     const until = winnerFlash[seatNo] || 0;
     return until > Date.now()
@@ -831,10 +1262,94 @@ export default function PokerTable() {
       : "";
   }
 
+  /** Seat helper */
+  const seatName = (seatNo: number) =>
+    seats.find((s) => s.seat_no === seatNo)?.username || `Seat ${seatNo}`;
+
+  /** Determine winning seats set (handles side pots via awards when present) */
+  const winnerSeatSet = useMemo(() => {
+    const set = new Set<number>();
+    if (!showdown) return set;
+    const source =
+      showdown.awards && showdown.awards.length > 0
+        ? showdown.awards
+        : showdown.winners;
+    source.forEach((w) => set.add(w.seatNo));
+    return set;
+  }, [showdown]);
+
+  /** Winner summary text lines */
+  const winnerSummaryLines = useMemo(() => {
+    if (!showdown) return [];
+    const board = showdown.board;
+    const linesSource =
+      showdown.awards && showdown.awards.length > 0
+        ? showdown.awards
+        : showdown.winners.map((w) => ({
+            seatNo: w.seatNo,
+            amount: w.amount,
+            potIndex: undefined as number | undefined,
+          }));
+
+    return linesSource.map((w) => {
+      const hole = showdown.revealed[w.seatNo];
+      const handTxt = hole ? labelBestHand(hole, board) : "";
+      const potLabel =
+        w.potIndex == null
+          ? ""
+          : w.potIndex === 0
+          ? " — Main pot"
+          : ` — Side pot #${w.potIndex}`;
+      return `${seatName(w.seatNo)} wins $${dollars(w.amount)}${
+        handTxt ? ` with ${handTxt}` : ""
+      }${potLabel}`;
+    });
+  }, [showdown, seats]);
+
+  /** Board highlight: union across winners.
+      If a winner has a flush, highlight ALL board cards of that suit. Otherwise, highlight best 5 indices. */
+  const boardHighlightSet = useMemo(() => {
+    const set = new Set<number>();
+    if (!showdown || !showdown.board?.length) return set;
+
+    const seatsToShow =
+      showdown.awards && showdown.awards.length > 0
+        ? showdown.awards.map((a) => a.seatNo)
+        : showdown.winners.map((a) => a.seatNo);
+
+    for (const sNo of seatsToShow) {
+      const hole = showdown.revealed[sNo];
+      if (!hole) continue;
+      const flushSuit = detectFlushSuit(hole, showdown.board);
+      if (flushSuit) {
+        showdown.board.forEach((c, idx) => {
+          if (c[1] === flushSuit) set.add(idx);
+        });
+      } else {
+        const sel = pickBestFive(hole, showdown.board);
+        sel.boardIdx.forEach((idx) => set.add(idx));
+      }
+    }
+    return set;
+  }, [showdown]);
+
   // ------- Render -------
+
+  // Start-game button visibility: first hand only, at least 2 seated, connected
+  const seatedCount = seats.filter((s) => !!s.user_id).length;
+  const showStartGame = !!ws && !hasAnyHandStarted && seatedCount >= 2;
+
+  const startGame = () => {
+    sendWs({ type: "START_GAME" });
+  };
+
+  // Slider safe bounds
+  const minSlider = (hand?.curBet ?? 0) === 0 ? minRaise : (hand?.curBet ?? 0) + minRaise;
+  const maxSlider = Math.max(minSlider, myStackApprox);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6">
+      {/* Left: Table */}
       <div className="rounded-2xl bg-card border border-white/10 p-4">
         <div className="flex items-center justify-between mb-1">
           <div className="text-xl font-bold">Texas Hold&apos;em</div>
@@ -847,29 +1362,27 @@ export default function PokerTable() {
           Main table is always open and public for quick play.
         </div>
 
-        {/* Table Felt */}
+        {/* Felt */}
         <div
           ref={feltRef}
-          className="relative h-[560px] rounded-2xl bg-gradient-to-b from-emerald-900/40 to-emerald-800/30 border border-white/10 overflow-hidden"
+          className="relative h-[640px] lg:h-[720px] rounded-2xl bg-gradient-to-b from-emerald-900/40 to-emerald-800/30 border border-white/10 overflow-hidden"
         >
+          {/* Start Game (first hand only) */}
+          {showStartGame && (
+            <div className="absolute top-3 right-3 z-10">
+              <Button onClick={startGame} className="px-3 py-1">
+                Start Game
+              </Button>
+            </div>
+          )}
+
           {ws && (
             <>
               {/* Inter-hand overlay */}
               {interWaitUntil && interLeft > 0 && (
-                <div className="absolute inset-0 flex flex-col items-center justify-start pt-2">
+                <div className="absolute inset-0 flex flex-col items-center justify-start pt-2 pointer-events-none">
                   <div className="rounded-full bg-white/10 px-3 py-1 text-sm text-white/80 border border-white/15">
                     Next round begins in {interLeft}s
-                  </div>
-                  <div className="mt-2 flex gap-2">
-                    <Button onClick={cashOut} className="px-2 py-1">
-                      Cash out
-                    </Button>
-                    <Button
-                      onClick={() => sendWs({ type: "SIT_OUT" })}
-                      className="px-2 py-1"
-                    >
-                      Sit out next hand
-                    </Button>
                   </div>
                 </div>
               )}
@@ -877,153 +1390,214 @@ export default function PokerTable() {
               {/* Pot cluster */}
               <div
                 ref={potRef}
-                className="absolute left-1/2 top-[42%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
+                className="absolute left-1/2 top-[25%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
               >
                 <div className="text-xs text-white/70">Pot</div>
                 <ChipStack amountCents={potCents} chipSize={28} />
                 <div className="text-white/80 text-sm mt-1">
-                  ${(potCents / 100).toFixed(2)}
+                  ${dollars(potCents)}
                 </div>
               </div>
 
-              {/* Board cards with gentle flip-in on change */}
-              <div className="absolute left-1/2 top-[24%] -translate-x-1/2 flex gap-2">
-                {(hand?.board ?? []).map((c, i) => (
-                  <div
-                    key={`${c[0]}${c[1]}-${i}`}
-                    className="animate-[fadeIn_240ms_ease-out] will-change-transform"
-                  >
-                    <Card rank={String(c[0])} suit={c[1]} />
-                  </div>
-                ))}
+              {/* Board cards (persist after hand) */}
+              <div className="absolute left-1/2 top-[35%] -translate-x-1/2 flex gap-2">
+                {(hand?.board ?? showdown?.board ?? []).map((c, i, arr) => {
+                  const highlight = boardHighlightSet.has(i);
+                  return (
+                    <div
+                      key={`${c[0]}${c[1]}-${i}`}
+                      className={[
+                        i === arr.length - 1 ? "animate-[fadeIn_240ms_ease-out]" : "",
+                        highlight
+                          ? "rounded-md ring-2 ring-yellow-300 shadow-[0_0_18px_rgba(250,204,21,0.6)]"
+                          : "",
+                      ].join(" ")}
+                    >
+                      <Card rank={displayRank(c[0])} suit={c[1]} />
+                    </div>
+                  );
+                })}
               </div>
+
+              {/* Winner summary */}
+              {winnerSummaryLines.length > 0 && (
+                <div className="absolute left-1/2 top-[53%] -translate-x-1/2 text-center px-3">
+                  <div className="inline-flex flex-col gap-1 bg-black/30 border border-white/10 rounded-md px-3 py-2">
+                    {winnerSummaryLines.map((line, idx) => (
+                      <div key={idx} className="text-white/85 text-sm">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Seats */}
               {seats.map((s, idx) => {
                 const seatIndex = s.seat_no ?? idx;
-                const pos = seatPositions[seatIndex] || {
-                  left: 360,
-                  top: 300,
-                  angle: 0,
-                };
+                const pos =
+                  seatPositions[seatIndex] || { left: 360, top: 300, angle: 0 };
                 const isMe = sameId(s.user_id, me?.id);
                 const pub = playersBySeat.get(seatIndex);
-                const isActing = actionSeat === seatIndex;
+                const actingThisSeat =
+                  actionSeat === seatIndex && pub && !pub.hasFolded && !pub.isAllIn;
+                const didFold = !!pub?.hasFolded;
 
-                const myHole = isMe ? hand?.myHole : undefined;
-                const isDealer = hand?.dealerSeat === seatIndex;
+                const progressRemaining = actingThisSeat
+                  ? Math.max(0, 1 - countdownUsed)
+                  : 0;
+                const degrees = Math.round(progressRemaining * 360);
 
-                const last = lastActions[seatIndex];
-                const lastOpacity = last
-                  ? Math.max(0, Math.min(1, (last.until - countdownNow) / 2000))
-                  : 0;
-                const progress = isActing ? 1 - countdownUsed : 0;
-                const betBase = Math.max(curBet, selected?.bigBlind ?? 1);
-                const betPct = pub
-                  ? Math.min(100, (pub.streetBet / betBase) * 100)
-                  : 0;
+                // Determine which hole to show:
+                // - If not folded and showdown present, reveal from showdown map
+                // - If mine and during hand, show myHole
+                // - If folded and user toggled, show folded cards (if provided by server)
+                let showHole: [[Rank, Suit], [Rank, Suit]] | null = null;
+                if (showdown) {
+                  if (!didFold && showdown.revealed[seatIndex]) {
+                    showHole = showdown.revealed[seatIndex];
+                  } else if (didFold && showFoldedMap[seatIndex] && showdown.folded[seatIndex]) {
+                    showHole = showdown.folded[seatIndex];
+                  }
+                }
+                if (!showdown && isMe && hand?.myHole && hand.myHole.length === 2) {
+                  showHole = hand.myHole;
+                }
+
+                // Highlighting of winners only
+                let holeHL: [boolean, boolean] = [false, false];
+                if (
+                  showdown &&
+                  showHole &&
+                  winnerSeatSet.has(seatIndex) &&
+                  showdown.board?.length
+                ) {
+                  // If the winner's best hand is a flush, highlight all cards of that suit
+                  const flushSuit = detectFlushSuit(showHole, showdown.board);
+                  if (flushSuit) {
+                    holeHL = [
+                      showHole[0][1] === flushSuit,
+                      showHole[1][1] === flushSuit,
+                    ];
+                  } else {
+                    const sel = pickBestFive(showHole, showdown.board);
+                    holeHL = sel.holeMask;
+                  }
+                }
+
+                const isWinner = showdown ? winnerSeatSet.has(seatIndex) : false;
 
                 return (
                   <div
                     key={seatIndex}
                     ref={(el) => (seatRefs.current[seatIndex] = el)}
-                    className={`absolute -translate-x-1/2 -translate-y-1/2 w-[176px]`}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 w-[176px]"
                     style={{ left: pos.left, top: pos.top }}
                   >
                     <div
-                      className={`rounded-xl ${isActing ? "p-[3px]" : ""}`}
-                      style={
-                        isActing
-                          ? {
-                              background: `conic-gradient(from -90deg, var(--accent,#22d3ee) ${progress * 360}deg, rgba(255,255,255,0.15) 0)`,
-                              WebkitMask:
-                                "radial-gradient(farthest-side,transparent calc(100% - 4px),#000 calc(100% - 4px))",
-                              mask:
-                                "radial-gradient(farthest-side,transparent calc(100% - 4px),#000 calc(100% - 4px))",
-                              transition: "background 120ms linear",
-                            }
-                          : {}
-                      }
+                      className={[
+                        "relative rounded-[12px] border bg-black/30 px-3 py-2",
+                        isMe ? "border-accent" : "border-white/10",
+                        pub?.isAllIn ? "ring-1 ring-yellow-400/60" : "",
+                        didFold ? "opacity-60" : "",
+                        actingThisSeat
+                          ? "shadow-[0_0_24px_rgba(34,211,238,0.25)]"
+                          : "",
+                        isWinner ? winnerGlowClass(seatIndex) : "",
+                      ].join(" ")}
                     >
-                      <div
-                        className={[
-                          "relative rounded-xl border bg-black/30 px-3 py-2",
-                          isMe ? "border-accent" : "border-white/10",
-                          pub?.isAllIn ? "ring-1 ring-yellow-400/60" : "",
-                          pub?.hasFolded ? "opacity-60" : "",
-                          winnerGlowClass(seatIndex),
-                        ].join(" ")}
-                      >
-                        {isDealer && (
-                          <div
-                            key={`dealer-${hand?.handId}`}
-                            className="absolute -left-2 -top-2 w-5 h-5 grid place-items-center rounded-full bg-white text-black text-[10px] font-bold shadow-sm animate-[bounce_0.6s_ease-out]"
-                          >
-                            D
-                          </div>
-                        )}
-                        <div className="flex items-center gap-2">
-                          <div className="text-sm font-semibold truncate">
-                            {s.username || "Empty"}
-                          </div>
-                        </div>
-                        {last && lastOpacity > 0 && (
-                          <div
-                            className="mt-1 mb-1 w-fit rounded-full bg-white/20 px-2 py-[1px] text-[11px] text-white/80 transition-opacity"
-                            style={{ opacity: lastOpacity }}
-                          >
-                            {last.text}
-                          </div>
-                        )}
+                      {/* CSS conic-gradient border timer */}
+                      {actingThisSeat && (
+                        <div
+                          className="pointer-events-none absolute -inset-[6px] rounded-[14px]"
+                          style={ringStyle(degrees)}
+                        />
+                      )}
 
-                        {/* Chips */}
-                        <div className="mt-1">
-                          <ChipStack amountCents={s.stack} chipSize={18} />
+                      {/* Dealer pip */}
+                      {hand?.dealerSeat === seatIndex && (
+                        <div className="absolute -left-2 -top-2 w-5 h-5 grid place-items-center rounded-full bg-white text-black text-[10px] font-bold shadow-sm">
+                          D
                         </div>
-                        <div className="text-xs text-white/70 mt-0.5">
-                          {(s.stack / 100).toFixed(2)}
-                        </div>
-                        {pub && (
-                          <div className="mt-1 h-1 w-full rounded bg-white/10">
-                            <div
-                              className="h-full rounded bg-accent"
-                              style={{ width: `${betPct}%` }}
-                            />
-                          </div>
-                        )}
+                      )}
 
-                        {/* Hole cards */}
-                        <div className="mt-1 flex gap-1">
-                          {isMe ? (
-                            myHole && myHole.length === 2 ? (
-                              <>
-                                <Card rank={String(myHole[0][0])} suit={myHole[0][1]} />
-                                <Card rank={String(myHole[1][0])} suit={myHole[1][1]} />
-                              </>
-                            ) : (
-                              <>
-                                <Card rank={""} suit={"S"} faceDown />
-                                <Card rank={""} suit={"S"} faceDown />
-                              </>
-                            )
-                          ) : pub ? (
-                            <>
-                              <Card rank={""} suit={"S"} faceDown />
-                              <Card rank={""} suit={"S"} faceDown />
-                            </>
-                          ) : null}
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm font-semibold truncate">
+                          {s.username || "Empty"}
                         </div>
-
-                        {/* Sit button */}
-                        {!s.user_id && mySeat == null && (
-                          <Button
-                            className="mt-2 px-2 py-1 w-full"
-                            onClick={() => takeSeat(seatIndex)}
-                          >
-                            Take
-                          </Button>
-                        )}
                       </div>
+
+                      {/* chips, stack */}
+                      <div className="mt-1">
+                        <ChipStack amountCents={s.stack} chipSize={18} />
+                      </div>
+                      <div className="text-xs text-white/70 mt-0.5">
+                        {(s.stack / 100).toFixed(2)}
+                      </div>
+
+                      {/* Hole cards */}
+                      <div className="mt-1 flex items-center gap-1">
+                        {showHole ? (
+                          <>
+                            <div
+                              className={
+                                holeHL[0]
+                                  ? "rounded-md ring-2 ring-yellow-300 shadow-[0_0_14px_rgba(250,204,21,0.55)]"
+                                  : ""
+                              }
+                            >
+                              <Card
+                                rank={displayRank(showHole[0][0])}
+                                suit={showHole[0][1]}
+                              />
+                            </div>
+                            <div
+                              className={
+                                holeHL[1]
+                                  ? "rounded-md ring-2 ring-yellow-300 shadow-[0_0_14px_rgba(250,204,21,0.55)]"
+                                  : ""
+                              }
+                            >
+                              <Card
+                                rank={displayRank(showHole[1][0])}
+                                suit={showHole[1][1]}
+                              />
+                            </div>
+                            {didFold && (
+                              <span className="ml-1 text-[10px] rounded px-1 py-0.5 bg-white/10 border border-white/10">
+                                Folded
+                              </span>
+                            )}
+                          </>
+                        ) : pub ? (
+                          <>
+                            <Card rank={""} suit={"S"} faceDown />
+                            <Card rank={""} suit={"S"} faceDown />
+                          </>
+                        ) : null}
+                      </div>
+
+                      {/* Folded-hand toggle (only after showdown and if server provided cards) */}
+                      {showdown && didFold && showdown.folded[seatIndex] && (
+                        <div className="mt-2">
+                          <button
+                            onClick={() => toggleShowFolded(seatIndex)}
+                            className="text-[11px] rounded border border-white/10 px-2 py-0.5 hover:border-accent"
+                            title="Reveal/hide folded hand"
+                          >
+                            {showFoldedMap[seatIndex] ? "Hide hand" : "Show hand"}
+                          </button>
+                        </div>
+                      )}
+
+                      {!s.user_id && mySeat == null && (
+                        <Button
+                          className="mt-2 px-2 py-1 w-full"
+                          onClick={() => takeSeat(seatIndex)}
+                        >
+                          Take
+                        </Button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1043,31 +1617,78 @@ export default function PokerTable() {
             </>
           )}
         </div>
+      </div>
 
-        {/* Betting controls + My hand helper */}
-        <div className="mt-3 rounded-xl bg-black/20 border border-white/10 p-3">
+      {/* Right: Lobby + Betting controls */}
+      <div className="flex flex-col gap-4">
+        {/* Lobby (fixed height with scroll) */}
+        <div className="rounded-2xl bg-card border border-white/10 p-4 h-[320px] flex flex-col">
+          <div className="text-white/70 text-sm">Table Lobby</div>
+          <div className="mt-2 space-y-2 overflow-y-auto pr-1">
+            {tables.map((t) => {
+              const joined = connectedTableId === t.id && !!ws;
+              return (
+                <div
+                  key={t.id}
+                  className={`rounded-lg border ${
+                    selected?.id === t.id ? "border-accent" : "border-white/10"
+                  } p-3 flex items-center justify-between`}
+                >
+                  <div>
+                    <div className="font-semibold">{t.name}</div>
+                    <div className="text-xs text-white/70">
+                      {t.seatsTaken}/{t.maxSeats} seats • Blinds{" "}
+                      {(t.smallBlind / 100).toFixed(2)}/
+                      {(t.bigBlind / 100).toFixed(2)}
+                    </div>
+                  </div>
+                  {!joined ? (
+                    <Button onClick={() => joinTable(t)} className="px-3 py-1">
+                      Join
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => leaveTable()}
+                      disabled={leaving}
+                      className={`px-3 py-1 border ${
+                        leaving
+                          ? "bg-red-600/60 text-white/70 border-red-500/20 cursor-not-allowed"
+                          : "bg-red-600 hover:bg-red-500 text-white border-red-500/40"
+                      }`}
+                    >
+                      {leaving ? "Leaving…" : "Leave"}
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Betting controls */}
+        <div className="rounded-2xl bg-card border border-white/10 p-4">
+          <div className="text-base font-semibold text-white/90 mb-2">
+            Betting Controls
+          </div>
+
           <div className="flex flex-wrap items-center gap-2">
             <div className="text-sm text-white/70">
               {actionSeat != null ? `To act: Seat ${actionSeat}` : "Waiting…"}
               {isMyTurn && deadline
-                ? ` • ${Math.max(
-                    0,
-                    Math.ceil((deadline - countdownNow) / 1000)
-                  )}s`
+                ? ` • ${Math.max(0, Math.ceil((deadline - countdownNow) / 1000))}s`
                 : ""}
             </div>
             <div className="ml-auto text-xs text-white/60">
               {isMyTurn ? (
                 <>
-                  To call: ${(toCall / 100).toFixed(2)} • Min raise: $
-                  {(minRaise / 100).toFixed(2)} • Current bet: $
-                  {(curBet / 100).toFixed(2)}
+                  To call: ${dollars(toCall)} • Min raise: ${dollars(minRaise)} •
+                  Current bet: ${dollars(hand?.curBet ?? 0)}
                 </>
               ) : null}
             </div>
           </div>
 
-          {/* My hand helper */}
+          {/* My hand helper (type only) */}
           {hand?.myHole && (
             <div className="mt-2 text-sm text-white/80">
               Your hand:{" "}
@@ -1075,7 +1696,8 @@ export default function PokerTable() {
             </div>
           )}
 
-          <div className="mt-2 flex flex-wrap gap-2">
+          {/* Primary action row */}
+          <div className="mt-3 flex flex-wrap gap-2">
             <Button
               onClick={() => sendPlayerAction("fold")}
               disabled={!myCanAct}
@@ -1095,146 +1717,106 @@ export default function PokerTable() {
               disabled={!myCanAct || toCall === 0}
               className="px-3 py-1"
             >
-              Call ${(toCall / 100).toFixed(2)}
+              Call ${dollars(toCall)}
             </Button>
-
-            {/* Bet / Raise slider */}
-            <div className="flex items-center gap-2">
-              <input
-                type="range"
-                min={curBet === 0 ? minRaise : curBet + minRaise}
-                max={myStackApprox}
-                step={100}
-                value={Math.round(Number(betInput || "0") * 100)}
-                onChange={(e) =>
-                  setBetInput((Number(e.target.value) / 100).toFixed(2))
-                }
-                className="w-40"
-                disabled={!myCanAct}
-              />
-              <span className="text-sm text-white/80">
-                ${betInput || "0.00"}
-              </span>
-              {curBet === 0 ? (
-                <Button
-                  onClick={() => {
-                    const toTotal = Math.round(Number(betInput || "0") * 100);
-                    if (!Number.isFinite(toTotal) || toTotal < minRaise) return;
-                    sendPlayerAction("bet", toTotal);
-                  }}
-                  disabled={!myCanAct}
-                >
-                  Bet
-                </Button>
-              ) : (
-                <Button
-                  onClick={() => {
-                    const toTotal = Math.round(Number(betInput || "0") * 100);
-                    if (!Number.isFinite(toTotal) || toTotal <= 0) return;
-                    sendPlayerAction("raise", toTotal);
-                  }}
-                  disabled={!myCanAct}
-                >
-                  Raise
-                </Button>
-              )}
-            </div>
-
-            {/* Quick presets */}
-            <div className="flex items-center gap-2 ml-auto">
-              <QuickTo
-                onClick={(v) => setBetInput(v.toFixed(2))}
-                bb={(selected?.bigBlind ?? 100) / 100}
-                label="2x"
-                mult={2}
-              />
-              <QuickTo
-                onClick={(v) => setBetInput(v.toFixed(2))}
-                bb={(selected?.bigBlind ?? 100) / 100}
-                label="3x"
-                mult={3}
-              />
-              <QuickTo
-                onClick={(v) => setBetInput(v.toFixed(2))}
-                bb={(selected?.bigBlind ?? 100) / 100}
-                label="1/2 Pot"
-                pot={potCents / 200}
-              />
-              <QuickTo
-                onClick={(v) => setBetInput(v.toFixed(2))}
-                bb={(selected?.bigBlind ?? 100) / 100}
-                label="All-in"
-                stack={myStackApprox / 100}
-              />
-            </div>
+            <Button
+              onClick={() => sendPlayerAction(toCall > 0 ? "fold" : "check")}
+              disabled={!myCanAct}
+              className="px-3 py-1"
+              title="Checks when free, folds when there's a bet"
+            >
+              Check/Fold
+            </Button>
           </div>
-        </div>
 
-        {ws && !seatedMe && (
-          <div className="mt-3 text-white/70">Pick a seat to start.</div>
-        )}
-        {error && <div className="text-danger mt-2 text-sm">{error}</div>}
-      </div>
-
-      {/* Lobby */}
-      <div className="rounded-2xl bg-card border border-white/10 p-4">
-        <div className="text-white/70 text-sm mb-2">Table Lobby</div>
-        <div className="space-y-2">
-          {tables.map((t) => {
-            const joined = connectedTableId === t.id && !!ws;
-            return (
-              <div
-                key={t.id}
-                className={`rounded-lg border ${
-                  selected?.id === t.id ? "border-accent" : "border-white/10"
-                } p-3 flex items-center justify-between`}
+          {/* Bet/Raise row — dedicated line to avoid wrap */}
+          <div className="mt-3 flex items-center gap-3 flex-wrap">
+            <input
+              type="range"
+              min={minSlider}
+              max={maxSlider}
+              step={100}
+              value={Math.min(
+                Math.max(minSlider, Math.round(Number(betInput || "0") * 100)),
+                maxSlider
+              )}
+              onChange={(e) =>
+                setBetInput((Number(e.target.value) / 100).toFixed(2))
+              }
+              className="w-56"
+              disabled={!myCanAct}
+            />
+            <span className="text-sm text-white/80">
+              ${betInput || "0.00"}
+            </span>
+            {(hand?.curBet ?? 0) === 0 ? (
+              <Button
+                onClick={() => {
+                  const toTotal = Math.round(Number(betInput || "0") * 100);
+                  if (!Number.isFinite(toTotal) || toTotal < minRaise) return;
+                  sendPlayerAction("bet", toTotal);
+                }}
+                disabled={!myCanAct}
               >
-                <div>
-                  <div className="font-semibold">{t.name}</div>
-                  <div className="text-xs text-white/70">
-                    {t.seatsTaken}/{t.maxSeats} seats • Blinds{" "}
-                    {(t.smallBlind / 100).toFixed(2)}/
-                    {(t.bigBlind / 100).toFixed(2)}
-                  </div>
-                </div>
-                {!joined ? (
-                  <Button onClick={() => joinTable(t)} className="px-3 py-1">
-                    Join
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={() => leaveTable()}
-                    disabled={leaving}
-                    className={`px-3 py-1 border ${
-                      leaving
-                        ? "bg-red-600/60 text-white/70 border-red-500/20 cursor-not-allowed"
-                        : "bg-red-600 hover:bg-red-500 text-white border-red-500/40"
-                    }`}
-                  >
-                    {leaving ? "Leaving…" : "Leave"}
-                  </Button>
-                )}
-              </div>
-            );
-          })}
+                Bet
+              </Button>
+            ) : (
+              <Button
+                onClick={() => {
+                  const toTotal = Math.round(Number(betInput || "0") * 100);
+                  if (!Number.isFinite(toTotal) || toTotal <= 0) return;
+                  sendPlayerAction("raise", toTotal);
+                }}
+                disabled={!myCanAct}
+              >
+                Raise
+              </Button>
+            )}
+          </div>
+
+          {/* Quick presets */}
+          <div className="mt-3 flex items-center gap-2">
+            <QuickTo
+              onClick={(v) => setBetInput(v.toFixed(2))}
+              bb={(selected?.bigBlind ?? 100) / 100}
+              label="2x"
+              mult={2}
+            />
+            <QuickTo
+              onClick={(v) => setBetInput(v.toFixed(2))}
+              bb={(selected?.bigBlind ?? 100) / 100}
+              label="3x"
+              mult={3}
+            />
+            <QuickTo
+              onClick={(v) => setBetInput(v.toFixed(2))}
+              bb={(selected?.bigBlind ?? 100) / 100}
+              label="1/2 Pot"
+              pot={(hand?.pot ?? 0) / 200}
+            />
+            <QuickTo
+              onClick={(v) => setBetInput(v.toFixed(2))}
+              bb={(selected?.bigBlind ?? 100) / 100}
+              label="All-in"
+              stack={myStackApprox / 100}
+            />
+          </div>
+
+          {/* Hints and errors */}
+          {ws && !seatedMe && (
+            <div className="mt-3 text-white/70">Pick a seat to start.</div>
+          )}
+          {error && <div className="text-danger mt-2 text-sm">{error}</div>}
         </div>
       </div>
 
       {/* Chip animation overlay */}
       <ChipFlightOverlay flights={flyingChips} chipSize={28} durationMs={500} />
 
-      {isMyTurn && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 animate-bounce">
-          <div className="rounded-full bg-accent px-4 py-2 text-black shadow">
-            Your turn
-          </div>
-        </div>
-      )}
-
       {/* Sit Down Modal */}
       {showSitModal && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/60">
-          <div className="w-[360px] rounded-xl bg-card border border-white/10 p-4">
+          <div className="w:[360px] rounded-xl bg-card border border-white/10 p-4">
             <div className="text-lg font-semibold mb-2">Sit Down</div>
             <div className="text-sm text-white/70 mb-2">
               Enter buy in amount in dollars.
