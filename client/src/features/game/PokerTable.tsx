@@ -249,6 +249,21 @@ export default function PokerTable() {
   const potRef = useRef<HTMLDivElement | null>(null);
   const seatRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
+  // Felt size for responsive seat placement
+  const feltRef = useRef<HTMLDivElement | null>(null);
+  const [feltSize, setFeltSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    if (!feltRef.current) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const cr = entry.contentRect;
+        setFeltSize({ w: cr.width, h: cr.height });
+      }
+    });
+    ro.observe(feltRef.current);
+    return () => ro.disconnect();
+  }, []);
+
   // Betting controls and countdown
   const [actionSeat, setActionSeat] = useState<number | null>(null);
   const [toCall, setToCall] = useState<number>(0); // cents
@@ -262,6 +277,15 @@ export default function PokerTable() {
 
   // Winner flash
   const [winnerFlash, setWinnerFlash] = useState<Record<number, number>>({}); // seatNo -> untilTs
+
+  // Per-seat last action tags
+  const [lastActions, setLastActions] = useState<Record<
+    number,
+    { text: string; until: number }
+  >>({});
+
+  // Lock actions during board reveals
+  const [revealLocked, setRevealLocked] = useState(false);
 
   // keep ticking
   useEffect(() => {
@@ -436,6 +460,77 @@ export default function PokerTable() {
         const cb = hand?.curBet ?? 0;
         const target = Math.max(cb + msg.minRaise, cb);
         setBetInput((target / 100).toFixed(2));
+        break;
+      }
+
+      case "PLAYER_ACTION_APPLIED": {
+        const text =
+          msg.action === "fold"
+            ? "Fold"
+            : msg.action === "check"
+            ? "Check"
+            : msg.action === "call"
+            ? `Call $${(msg.amount / 100).toFixed(2)}`
+            : msg.action === "bet"
+            ? `Bet $${(msg.amount / 100).toFixed(2)}`
+            : `Raise $${(msg.amount / 100).toFixed(2)}`;
+        setLastActions((prev) => ({
+          ...prev,
+          [msg.seatNo]: { text, until: Date.now() + 2000 },
+        }));
+        setHand((prev) =>
+          prev
+            ? {
+                ...prev,
+                players: prev.players.map((p) =>
+                  p.seatNo === msg.seatNo
+                    ? {
+                        ...p,
+                        streetBet:
+                          msg.action === "fold" ? p.streetBet : p.streetBet + msg.amount,
+                        totalContrib: p.totalContrib + msg.amount,
+                        hasFolded: msg.action === "fold" ? true : p.hasFolded,
+                      }
+                    : p
+                ),
+              }
+            : prev
+        );
+        break;
+      }
+
+      case "DEAL_FLOP": {
+        setRevealLocked(true);
+        msg.cards.forEach((card, i) => {
+          setTimeout(() => {
+            setHand((prev) =>
+              prev ? { ...prev, board: [...prev.board, card] } : prev
+            );
+            if (i === msg.cards.length - 1) setRevealLocked(false);
+          }, i * 120);
+        });
+        break;
+      }
+
+      case "DEAL_TURN": {
+        setRevealLocked(true);
+        setTimeout(() => {
+          setHand((prev) =>
+            prev ? { ...prev, board: [...prev.board, msg.card] } : prev
+          );
+          setRevealLocked(false);
+        }, 300);
+        break;
+      }
+
+      case "DEAL_RIVER": {
+        setRevealLocked(true);
+        setTimeout(() => {
+          setHand((prev) =>
+            prev ? { ...prev, board: [...prev.board, msg.card] } : prev
+          );
+          setRevealLocked(false);
+        }, 300);
         break;
       }
 
@@ -659,7 +754,11 @@ export default function PokerTable() {
   const isMyTurn =
     actionSeat != null && mySeat != null && actionSeat === mySeat;
   const myCanAct =
-    isMyTurn && myPlayer && !myPlayer.hasFolded && !myPlayer.isAllIn;
+    isMyTurn &&
+    myPlayer &&
+    !myPlayer.hasFolded &&
+    !myPlayer.isAllIn &&
+    !revealLocked;
 
   const myStackApprox = useMemo(() => {
     if (mySeat == null) return 0;
@@ -702,21 +801,27 @@ export default function PokerTable() {
 
   // ------- Layout helpers -------
 
-  // Precompute seat positions evenly on a circle, using table max seats
+  // Precompute seat positions anchored to felt center using ellipse
   const seatPositions = useMemo(() => {
     const count = selected?.maxSeats || seats.length || 6;
+    const w = feltSize.w || 720;
+    const h = feltSize.h || 560;
+    const centerX = w / 2;
+    const centerY = h * 0.58;
+    let radiusX = w * 0.36;
+    let radiusY = h * 0.38;
+    if (h < 400) radiusY *= 0.9;
     const list: { left: number; top: number; angle: number }[] = [];
-    const radius = 210;
-    const centerX = 360; // center of felt container (width ~720)
-    const centerY = 300; // slightly below board/pot cluster
     for (let i = 0; i < count; i++) {
       const angle = (i / count) * Math.PI * 2;
-      const left = centerX + Math.cos(angle) * radius;
-      const top = centerY + Math.sin(angle) * radius;
+      let left = centerX + radiusX * Math.cos(angle);
+      let top = centerY + radiusY * Math.sin(angle);
+      const safeTop = h * 0.25;
+      if (top < safeTop) top = safeTop + 24;
       list.push({ left, top, angle });
     }
     return list;
-  }, [selected?.maxSeats, seats.length]);
+  }, [selected?.maxSeats, seats.length, feltSize]);
 
   // Utility: winner glow active?
   function winnerGlowClass(seatNo: number) {
@@ -743,13 +848,29 @@ export default function PokerTable() {
         </div>
 
         {/* Table Felt */}
-        <div className="relative h-[560px] rounded-2xl bg-gradient-to-b from-emerald-900/40 to-emerald-800/30 border border-white/10 overflow-hidden">
+        <div
+          ref={feltRef}
+          className="relative h-[560px] rounded-2xl bg-gradient-to-b from-emerald-900/40 to-emerald-800/30 border border-white/10 overflow-hidden"
+        >
           {ws && (
             <>
               {/* Inter-hand overlay */}
               {interWaitUntil && interLeft > 0 && (
-                <div className="absolute inset-x-0 top-2 mx-auto w-fit rounded-full bg-white/10 px-3 py-1 text-sm text-white/80 border border-white/15">
-                  Next hand in {interLeft}s
+                <div className="absolute inset-0 flex flex-col items-center justify-start pt-2">
+                  <div className="rounded-full bg-white/10 px-3 py-1 text-sm text-white/80 border border-white/15">
+                    Next round begins in {interLeft}s
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <Button onClick={cashOut} className="px-2 py-1">
+                      Cash out
+                    </Button>
+                    <Button
+                      onClick={() => sendWs({ type: "SIT_OUT" })}
+                      className="px-2 py-1"
+                    >
+                      Sit out next hand
+                    </Button>
+                  </div>
                 </div>
               )}
 
@@ -792,12 +913,15 @@ export default function PokerTable() {
                 const myHole = isMe ? hand?.myHole : undefined;
                 const isDealer = hand?.dealerSeat === seatIndex;
 
-                // timer ring numbers
-                const R = 26; // radius
-                const C = 2 * Math.PI * R;
-                const used = isActing ? countdownUsed : 0; // 0..1
-                const dash = Math.max(0, C * (1 - used)); // remaining circumference
-                const dashOffset = 0; // draw from start; we rotate to make it "unfill" CCW
+                const last = lastActions[seatIndex];
+                const lastOpacity = last
+                  ? Math.max(0, Math.min(1, (last.until - countdownNow) / 2000))
+                  : 0;
+                const progress = isActing ? 1 - countdownUsed : 0;
+                const betBase = Math.max(curBet, selected?.bigBlind ?? 1);
+                const betPct = pub
+                  ? Math.min(100, (pub.streetBet / betBase) * 100)
+                  : 0;
 
                 return (
                   <div
@@ -806,100 +930,100 @@ export default function PokerTable() {
                     className={`absolute -translate-x-1/2 -translate-y-1/2 w-[176px]`}
                     style={{ left: pos.left, top: pos.top }}
                   >
-                    {/* Turn timer ring */}
-                    <svg
-                      viewBox="0 0 64 64"
-                      width="64"
-                      height="64"
-                      className="absolute -left-3 -top-3 pointer-events-none"
-                      style={{
-                        transform: "rotate(90deg) scaleX(-1)", // makes it unfill CCW
-                        opacity: isActing ? 1 : 0.25,
-                        transition: "opacity 120ms linear",
-                      }}
-                    >
-                      <circle
-                        cx="32"
-                        cy="32"
-                        r={R}
-                        fill="none"
-                        stroke="rgba(255,255,255,0.15)"
-                        strokeWidth="6"
-                      />
-                      <circle
-                        cx="32"
-                        cy="32"
-                        r={R}
-                        fill="none"
-                        stroke="var(--accent, #22d3ee)"
-                        strokeWidth="6"
-                        strokeLinecap="round"
-                        strokeDasharray={`${dash} ${C}`}
-                        strokeDashoffset={dashOffset}
-                        style={{ transition: "stroke-dasharray 120ms linear" }}
-                      />
-                    </svg>
-
-                    {/* Seat panel */}
                     <div
-                      className={[
-                        "rounded-xl border bg-black/30 px-3 py-2",
-                        isMe ? "border-accent" : "border-white/10",
-                        pub?.isAllIn ? "ring-1 ring-yellow-400/60" : "",
-                        pub?.hasFolded ? "opacity-60" : "",
-                        winnerGlowClass(seatIndex),
-                      ].join(" ")}
+                      className={`rounded-xl ${isActing ? "p-[3px]" : ""}`}
+                      style={
+                        isActing
+                          ? {
+                              background: `conic-gradient(from -90deg, var(--accent,#22d3ee) ${progress * 360}deg, rgba(255,255,255,0.15) 0)`,
+                              WebkitMask:
+                                "radial-gradient(farthest-side,transparent calc(100% - 4px),#000 calc(100% - 4px))",
+                              mask:
+                                "radial-gradient(farthest-side,transparent calc(100% - 4px),#000 calc(100% - 4px))",
+                              transition: "background 120ms linear",
+                            }
+                          : {}
+                      }
                     >
-                      <div className="flex items-center gap-2">
-                        <div className="text-sm font-semibold truncate">
-                          {s.username || "Empty"}
-                        </div>
+                      <div
+                        className={[
+                          "relative rounded-xl border bg-black/30 px-3 py-2",
+                          isMe ? "border-accent" : "border-white/10",
+                          pub?.isAllIn ? "ring-1 ring-yellow-400/60" : "",
+                          pub?.hasFolded ? "opacity-60" : "",
+                          winnerGlowClass(seatIndex),
+                        ].join(" ")}
+                      >
                         {isDealer && (
-                          <div className="ml-auto shrink-0 w-5 h-5 grid place-items-center rounded-full bg-white/90 text-black text-[10px] font-bold">
+                          <div
+                            key={`dealer-${hand?.handId}`}
+                            className="absolute -left-2 -top-2 w-5 h-5 grid place-items-center rounded-full bg-white text-black text-[10px] font-bold shadow-sm animate-[bounce_0.6s_ease-out]"
+                          >
                             D
                           </div>
                         )}
-                      </div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-semibold truncate">
+                            {s.username || "Empty"}
+                          </div>
+                        </div>
+                        {last && lastOpacity > 0 && (
+                          <div
+                            className="mt-1 mb-1 w-fit rounded-full bg-white/20 px-2 py-[1px] text-[11px] text-white/80 transition-opacity"
+                            style={{ opacity: lastOpacity }}
+                          >
+                            {last.text}
+                          </div>
+                        )}
 
-                      {/* Chips */}
-                      <div className="mt-1">
-                        <ChipStack amountCents={s.stack} chipSize={18} />
-                      </div>
-                      <div className="text-xs text-white/70 mt-0.5">
-                        ${(s.stack / 100).toFixed(2)}
-                      </div>
+                        {/* Chips */}
+                        <div className="mt-1">
+                          <ChipStack amountCents={s.stack} chipSize={18} />
+                        </div>
+                        <div className="text-xs text-white/70 mt-0.5">
+                          {(s.stack / 100).toFixed(2)}
+                        </div>
+                        {pub && (
+                          <div className="mt-1 h-1 w-full rounded bg-white/10">
+                            <div
+                              className="h-full rounded bg-accent"
+                              style={{ width: `${betPct}%` }}
+                            />
+                          </div>
+                        )}
 
-                      {/* Hole cards */}
-                      <div className="mt-1 flex gap-1">
-                        {isMe ? (
-                          myHole && myHole.length === 2 ? (
-                            <>
-                              <Card rank={String(myHole[0][0])} suit={myHole[0][1]} />
-                              <Card rank={String(myHole[1][0])} suit={myHole[1][1]} />
-                            </>
-                          ) : (
+                        {/* Hole cards */}
+                        <div className="mt-1 flex gap-1">
+                          {isMe ? (
+                            myHole && myHole.length === 2 ? (
+                              <>
+                                <Card rank={String(myHole[0][0])} suit={myHole[0][1]} />
+                                <Card rank={String(myHole[1][0])} suit={myHole[1][1]} />
+                              </>
+                            ) : (
+                              <>
+                                <Card rank={""} suit={"S"} faceDown />
+                                <Card rank={""} suit={"S"} faceDown />
+                              </>
+                            )
+                          ) : pub ? (
                             <>
                               <Card rank={""} suit={"S"} faceDown />
                               <Card rank={""} suit={"S"} faceDown />
                             </>
-                          )
-                        ) : pub ? (
-                          <>
-                            <Card rank={""} suit={"S"} faceDown />
-                            <Card rank={""} suit={"S"} faceDown />
-                          </>
-                        ) : null}
-                      </div>
+                          ) : null}
+                        </div>
 
-                      {/* Sit button */}
-                      {!s.user_id && mySeat == null && (
-                        <Button
-                          className="mt-2 px-2 py-1 w-full"
-                          onClick={() => takeSeat(seatIndex)}
-                        >
-                          Take
-                        </Button>
-                      )}
+                        {/* Sit button */}
+                        {!s.user_id && mySeat == null && (
+                          <Button
+                            className="mt-2 px-2 py-1 w-full"
+                            onClick={() => takeSeat(seatIndex)}
+                          >
+                            Take
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -974,23 +1098,28 @@ export default function PokerTable() {
               Call ${(toCall / 100).toFixed(2)}
             </Button>
 
-            {/* Bet / Raise to-total input (dollars) */}
+            {/* Bet / Raise slider */}
             <div className="flex items-center gap-2">
-              <span className="text-sm text-white/70">To</span>
               <input
-                type="number"
-                step={0.01}
-                value={betInput}
-                onChange={(e) => setBetInput(e.target.value)}
-                className="w-24 rounded-md bg-black/30 border border-white/10 px-2 py-1 text-white/90"
+                type="range"
+                min={curBet === 0 ? minRaise : curBet + minRaise}
+                max={myStackApprox}
+                step={100}
+                value={Math.round(Number(betInput || "0") * 100)}
+                onChange={(e) =>
+                  setBetInput((Number(e.target.value) / 100).toFixed(2))
+                }
+                className="w-40"
                 disabled={!myCanAct}
               />
+              <span className="text-sm text-white/80">
+                ${betInput || "0.00"}
+              </span>
               {curBet === 0 ? (
                 <Button
                   onClick={() => {
                     const toTotal = Math.round(Number(betInput || "0") * 100);
-                    if (!Number.isFinite(toTotal) || toTotal <= 0) return;
-                    if (toTotal < minRaise) return;
+                    if (!Number.isFinite(toTotal) || toTotal < minRaise) return;
                     sendPlayerAction("bet", toTotal);
                   }}
                   disabled={!myCanAct}
@@ -1028,8 +1157,8 @@ export default function PokerTable() {
               <QuickTo
                 onClick={(v) => setBetInput(v.toFixed(2))}
                 bb={(selected?.bigBlind ?? 100) / 100}
-                label="Pot"
-                pot={potCents / 100}
+                label="1/2 Pot"
+                pot={potCents / 200}
               />
               <QuickTo
                 onClick={(v) => setBetInput(v.toFixed(2))}
@@ -1093,6 +1222,14 @@ export default function PokerTable() {
 
       {/* Chip animation overlay */}
       <ChipFlightOverlay flights={flyingChips} chipSize={28} durationMs={500} />
+
+      {isMyTurn && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 animate-bounce">
+          <div className="rounded-full bg-accent px-4 py-2 text-black shadow">
+            Your turn
+          </div>
+        </div>
+      )}
 
       {/* Sit Down Modal */}
       {showSitModal && (
