@@ -480,13 +480,6 @@ export default function PokerTable() {
 
   const myPlayer = mySeat != null ? playersBySeat.get(mySeat) || null : null;
 
-  // local toggles for showing folded hands
-  const [showFoldedMap, setShowFoldedMap] = useState<Record<number, boolean>>(
-    {}
-  );
-  const toggleShowFolded = (seatNo: number) =>
-    setShowFoldedMap((prev) => ({ ...prev, [seatNo]: !prev[seatNo] }));
-
   useEffect(() => {
     fetchMe();
   }, [fetchMe]);
@@ -1441,7 +1434,7 @@ export default function PokerTable() {
                 const pub = playersBySeat.get(seatIndex);
                 const actingThisSeat =
                   actionSeat === seatIndex && pub && !pub.hasFolded && !pub.isAllIn;
-                const didFold = !!pub?.hasFolded;
+                const didFold = !!pub?.hasFolded || (!!showdown && !!showdown.folded[seatIndex]);
 
                 const progressRemaining = actingThisSeat
                   ? Math.max(0, 1 - countdownUsed)
@@ -1454,9 +1447,9 @@ export default function PokerTable() {
                 // - If folded and user toggled, show folded cards (if provided by server)
                 let showHole: [[Rank, Suit], [Rank, Suit]] | null = null;
                 if (showdown) {
-                  if (!didFold && showdown.revealed[seatIndex]) {
+                  if (showdown.revealed[seatIndex]) {
                     showHole = showdown.revealed[seatIndex];
-                  } else if (didFold && showFoldedMap[seatIndex] && showdown.folded[seatIndex]) {
+                  } else if (didFold && isMe && showdown.folded[seatIndex]) {
                     showHole = showdown.folded[seatIndex];
                   }
                 }
@@ -1578,14 +1571,14 @@ export default function PokerTable() {
                       </div>
 
                       {/* Folded-hand toggle (only after showdown and if server provided cards) */}
-                      {showdown && didFold && showdown.folded[seatIndex] && (
+                      {showdown && didFold && isMe && showdown.folded[seatIndex] && !showdown.revealed[seatIndex] && (
                         <div className="mt-2">
                           <button
-                            onClick={() => toggleShowFolded(seatIndex)}
+                            onClick={() => sendWs({ type: "SHOW_HAND" })}
                             className="text-[11px] rounded border border-white/10 px-2 py-0.5 hover:border-accent"
-                            title="Reveal/hide folded hand"
+                            title="Reveal folded hand to table"
                           >
-                            {showFoldedMap[seatIndex] ? "Hide hand" : "Show hand"}
+                            Show hand
                           </button>
                         </div>
                       )}

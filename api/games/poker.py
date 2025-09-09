@@ -137,6 +137,8 @@ class PokerTable:
         self._actions_queue: asyncio.Queue = asyncio.Queue()
         # monotonic timestamp when next hand is allowed to start
         self._next_hand_ready_at: float = 0.0
+        self._last_hand_holes: Dict[int, List[Tuple[int, str]]] = {}
+        self._last_hand_folded: Dict[int, bool] = {}
 
     # --------- Connection / snapshots ---------
 
@@ -352,6 +354,8 @@ class PokerTable:
     async def _play_hand(self):
         # Clear any pause marker as we are starting a hand
         self._next_hand_ready_at = 0.0
+        self._last_hand_holes = {}
+        self._last_hand_folded = {}
 
         n = len(self.seats)
 
@@ -511,14 +515,21 @@ class PokerTable:
 
         await self._flush_action_queue()
 
-        have_acted: Set[int] = set()
-        active: Set[int] = self._active_set()
-        last_raiser: Optional[int] = h.big_blind_seat if preflop else None
-
         current = start_from
+        last_raiser: Optional[int] = None
+
         while True:
+            if self._everyone_matched():
+                nxt = self._next_seat(current)
+                if last_raiser is None:
+                    if nxt == start_from:
+                        break
+                else:
+                    if nxt == last_raiser:
+                        break
+
             if not self._eligible_actor(current):
-                if len(self._active_set()) <= 1 or self._everyone_matched():
+                if len(self._active_set()) <= 1:
                     break
                 current = self._next_seat(current)
                 continue
@@ -533,16 +544,12 @@ class PokerTable:
                 to_call = max(0, h.cur_bet - p.street_bet)
                 if to_call == 0:
                     await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "check", "amount": 0, "toCallNext": 0})
-                    have_acted.add(current)
                 else:
                     p.has_folded = True
                     await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "fold", "amount": 0, "toCallNext": 0})
-                    active.discard(current)
                 if len([sn for sn, pl in h.players.items() if not pl.has_folded]) <= 1:
                     await self._single_winner_early()
                     return
-                if self._everyone_matched() and have_acted.issuperset(self._active_set()):
-                    break
                 current = self._next_seat(current)
                 continue
 
@@ -556,16 +563,12 @@ class PokerTable:
             seat = self.seats[current]
             to_call = max(0, h.cur_bet - p.street_bet)
 
-            reopened = False
-
             if action in ("fold", "check/fold"):
                 p.has_folded = True
-                active.discard(current)
                 await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "fold", "amount": 0, "toCallNext": 0})
             elif action == "check":
                 if to_call != 0:
                     continue
-                have_acted.add(current)
                 await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "check", "amount": 0, "toCallNext": 0})
             elif action == "call":
                 pay = min(to_call, seat.stack)
@@ -574,7 +577,6 @@ class PokerTable:
                 p.total_contrib += pay
                 if seat.stack == 0:
                     p.is_allin = True
-                have_acted.add(current)
                 await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "call", "amount": pay, "toCallNext": 0})
             elif action == "bet":
                 if h.cur_bet != 0:
@@ -598,8 +600,6 @@ class PokerTable:
                 h.cur_bet = max(h.cur_bet, p.street_bet)
                 h.min_raise = max(h.min_raise, h.cur_bet if prev_cur == 0 else h.cur_bet - prev_cur)
                 last_raiser = current
-                have_acted = {current}
-                reopened = True
                 await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "bet", "amount": inc, "toCallNext": 0})
             elif action == "raise":
                 target_total = max(h.cur_bet, raw_amt)
@@ -619,13 +619,8 @@ class PokerTable:
                         h.min_raise = raise_size
                         h.cur_bet = p.street_bet
                         last_raiser = current
-                        have_acted = {current}
-                        reopened = True
                     else:
                         h.cur_bet = p.street_bet
-                        have_acted.add(current)
-                else:
-                    have_acted.add(current)
                 await self.broadcast({"type": "PLAYER_ACTION_APPLIED", "seatNo": current, "action": "raise", "amount": pay, "toCallNext": 0})
             else:
                 continue
@@ -633,9 +628,6 @@ class PokerTable:
             if len([sn for sn, pl in h.players.items() if not pl.has_folded]) <= 1:
                 await self._single_winner_early()
                 return
-
-            if self._everyone_matched() and have_acted.issuperset(self._active_set()):
-                break
 
             current = self._next_seat(current)
 
@@ -657,6 +649,17 @@ class PokerTable:
             "timeLeftMs": self.ACTION_TIMEOUT_MS,
         })
         await self.send_snapshot()
+
+    async def _reveal_folded_hand(self, client: WsClient):
+        sn = client.seat_no
+        if sn is None:
+            return
+        cards = self._last_hand_holes.get(sn)
+        if not cards:
+            return
+        if not self._last_hand_folded.get(sn):
+            return
+        await self.broadcast({"type": "SHOWDOWN", "hands": [{"seatNo": sn, "cards": cards}]})
 
     async def _single_winner_early(self):
         if not self.hand:
@@ -716,7 +719,35 @@ class PokerTable:
 
         pots = self._build_side_pots()
         h.pots = pots
-        await self.broadcast({"type": "SHOWDOWN", "hands": None, "pots": pots})
+
+        public_hands = [
+            {"seatNo": sn, "cards": [(r, s) for (r, s) in p.hole]}
+            for sn, p in h.players.items()
+            if not p.has_folded
+        ]
+        await self.broadcast({"type": "SHOWDOWN", "hands": public_hands, "pots": pots})
+
+        for c in list(self.clients):
+            if c.seat_no is None:
+                continue
+            pl = h.players.get(c.seat_no)
+            if pl and pl.has_folded:
+                await self.broadcast(
+                    {
+                        "type": "SHOWDOWN",
+                        "hands": [
+                            {
+                                "seatNo": c.seat_no,
+                                "cards": [(r, s) for (r, s) in pl.hole],
+                                "folded": True,
+                            }
+                        ],
+                    },
+                    to=[c],
+                )
+
+        self._last_hand_holes = {sn: [(r, s) for (r, s) in p.hole] for sn, p in h.players.items()}
+        self._last_hand_folded = {sn: p.has_folded for sn, p in h.players.items()}
 
         for idx, pot in enumerate(pots):
             if pot["amount"] <= 0 or not pot["eligible"]:
@@ -774,6 +805,8 @@ class PokerTable:
                     self._ensure_game_loop()
             elif t == "PLAYER_ACTION":
                 self._actions_queue.put_nowait((client, data))
+            elif t == "SHOW_HAND":
+                await self._reveal_folded_hand(client)
             else:
                 await client.ws.send_json({"type": "ERROR", "reason": f"Unknown message {t}"})
         except Exception as e:
